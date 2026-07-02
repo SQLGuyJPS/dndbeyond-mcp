@@ -1,5 +1,8 @@
 # D&D Beyond MCP Server — Feature Audit
 
+> **Stale (2026-07-02):** this audit is from 2026-02-14; several issues below are already fixed.
+> For the current, tracked known-issues and backlog, see [`BACKLOG.md`](./BACKLOG.md).
+
 **Date:** 2026-02-14
 **Build:** Passes clean (TypeScript strict mode, no warnings)
 **Tests:** 190/190 passing across 18 test files
