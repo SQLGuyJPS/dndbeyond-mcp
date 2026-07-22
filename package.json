@@ -25,6 +25,7 @@
     "dev": "tsc --watch",
     "start": "node build/src/index.js",
     "setup": "node build/setup/auth-flow.js",
+    "compendium:download": "node build/src/scripts/download-compendium.js",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:live": "vitest run --config vitest.live.config.ts"
