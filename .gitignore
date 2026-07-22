@@ -34,3 +34,6 @@ coverage/
 
 # npm
 *.tgz
+
+# Git worktrees
+.worktrees/
