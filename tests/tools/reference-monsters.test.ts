@@ -55,6 +55,11 @@ const MOCK_CONFIG = {
   alignments: [{ id: 9, name: "Chaotic Evil" }],
   damageTypes: [{ id: 1, name: "Fire" }],
   senses: [{ id: 2, name: "Darkvision" }],
+  damageAdjustments: [
+    { id: 1, name: "Fire", type: 1 },
+    { id: 2, name: "Poison", type: 2 },
+    { id: 3, name: "Bludgeoning", type: 3 },
+  ],
 };
 
 const MOCK_MONSTER = {
@@ -103,6 +108,14 @@ const MOCK_MONSTER = {
   sensesHtml: "",
   skillsHtml: "Stealth +6",
   conditionImmunitiesHtml: "",
+};
+
+const MOCK_MONSTER_WITH_ADJUSTMENTS = {
+  ...MOCK_MONSTER,
+  id: 17101,
+  name: "Ochre Jelly",
+  damageAdjustments: [1, 2, 3],
+  conditionImmunitiesHtml: "<a>Prone</a>, <a>Poisoned</a>",
 };
 
 // Helper: create a mock client that routes config calls automatically
@@ -352,5 +365,55 @@ describe("getMonster", () => {
 
     const result = await getMonster(mockClient, { monsterName: "goblin" });
     expect(result.content[0].text).toContain("Goblin");
+  });
+
+  it("shouldIncludeDamageAndConditionAdjustmentsWhenPresent", async () => {
+    const mockClient = createRoutingMockClient([
+      {
+        accessType: { "17101": 1 },
+        pagination: { take: 5, skip: 0, currentPage: 1, pages: 1, total: 1 },
+        data: [MOCK_MONSTER_WITH_ADJUSTMENTS],
+      },
+      { accessType: 1, data: MOCK_MONSTER_WITH_ADJUSTMENTS },
+    ]);
+
+    const result = await getMonster(mockClient, { monsterName: "Ochre Jelly" });
+    const text = result.content[0].text;
+
+    expect(text).toContain("**Damage Vulnerabilities** Bludgeoning");
+    expect(text).toContain("**Damage Resistances** Fire");
+    expect(text).toContain("**Damage Immunities** Poison");
+    expect(text).toContain("**Condition Immunities** Prone, Poisoned");
+
+    // Canonical stat-block order: Vulnerabilities, Resistances, Immunities, Condition Immunities, then Senses.
+    const vulnIdx = text.indexOf("Damage Vulnerabilities");
+    const resIdx = text.indexOf("Damage Resistances");
+    const immIdx = text.indexOf("Damage Immunities");
+    const condIdx = text.indexOf("Condition Immunities");
+    const sensesIdx = text.indexOf("**Senses**");
+    expect(vulnIdx).toBeGreaterThan(-1);
+    expect(vulnIdx).toBeLessThan(resIdx);
+    expect(resIdx).toBeLessThan(immIdx);
+    expect(immIdx).toBeLessThan(condIdx);
+    expect(condIdx).toBeLessThan(sensesIdx);
+  });
+
+  it("shouldOmitDamageAndConditionAdjustmentLinesWhenAbsent", async () => {
+    const mockClient = createRoutingMockClient([
+      {
+        accessType: { "17100": 1 },
+        pagination: { take: 5, skip: 0, currentPage: 1, pages: 1, total: 1 },
+        data: [MOCK_MONSTER],
+      },
+      { accessType: 1, data: MOCK_MONSTER },
+    ]);
+
+    const result = await getMonster(mockClient, { monsterName: "Goblin" });
+    const text = result.content[0].text;
+
+    expect(text).not.toContain("Damage Vulnerabilities");
+    expect(text).not.toContain("Damage Resistances");
+    expect(text).not.toContain("Damage Immunities");
+    expect(text).not.toContain("Condition Immunities");
   });
 });
