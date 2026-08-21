@@ -18,6 +18,7 @@ interface GameConfig {
   damageTypes: Array<{ id: number; name: string }>;
   senses: Array<{ id: number; name: string }>;
   sources?: Array<{ id: number; name: string }>;
+  damageAdjustments: Array<{ id: number; name: string; type: number }>;
 }
 
 const SIZE_MAP: Record<number, string> = {
@@ -710,6 +711,24 @@ export async function getMonster(
   // Skills
   if (m.skillsHtml) {
     lines.push(`**Skills** ${stripHtml(m.skillsHtml)}`);
+  }
+
+  // Damage vulnerabilities / resistances / immunities
+  if (m.damageAdjustments && m.damageAdjustments.length > 0) {
+    const adjMap = new Map(config.damageAdjustments.map((a) => [a.id, a]));
+    const byType: Record<number, string[]> = { 1: [], 2: [], 3: [] };
+    for (const id of m.damageAdjustments) {
+      const adj = adjMap.get(id);
+      if (adj && byType[adj.type]) byType[adj.type].push(adj.name);
+    }
+    if (byType[3].length > 0) lines.push(`**Damage Vulnerabilities** ${byType[3].join(", ")}`);
+    if (byType[1].length > 0) lines.push(`**Damage Resistances** ${byType[1].join(", ")}`);
+    if (byType[2].length > 0) lines.push(`**Damage Immunities** ${byType[2].join(", ")}`);
+  }
+
+  // Condition immunities
+  if (m.conditionImmunitiesHtml) {
+    lines.push(`**Condition Immunities** ${stripHtml(m.conditionImmunitiesHtml)}`);
   }
 
   // Senses
