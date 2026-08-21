@@ -106,7 +106,7 @@ interface DdbMonster {
   stats: Array<{ statId: number; value: number }>;
   skills: Array<{ skillId: number; value: number }>;
   senses: Array<{ senseId: number; notes: string }>;
-  savingThrows: Array<{ statId: number; bonusModifier: number }>;
+  savingThrows: Array<{ statId: number; bonusModifier: number | null }>;
   movements: Array<{ movementId: number; speed: number; notes: string | null }>;
   languages: Array<{ languageId: number; notes: string }>;
   damageAdjustments: number[];
@@ -689,6 +689,7 @@ export async function getMonster(
   }
 
   // Ability scores
+  const statMap = new Map(m.stats?.map((s) => [s.statId, s.value]) ?? []);
   if (m.stats && m.stats.length > 0) {
     lines.push("");
     const statLine = m.stats
@@ -700,10 +701,16 @@ export async function getMonster(
 
   lines.push("");
 
-  // Saving throws
+  // Saving throws — the API's bonusModifier is null except when a monster has a
+  // manual override; the standard bonus is ability modifier + proficiency bonus.
   if (m.savingThrows && m.savingThrows.length > 0) {
+    const profBonus = cr?.proficiencyBonus ?? 0;
     const saves = m.savingThrows
-      .map((s) => `${STAT_NAMES[s.statId]} +${s.bonusModifier}`)
+      .map((s) => {
+        const bonus =
+          s.bonusModifier ?? Math.floor(((statMap.get(s.statId) ?? 10) - 10) / 2) + profBonus;
+        return `${STAT_NAMES[s.statId]} ${bonus >= 0 ? "+" : ""}${bonus}`;
+      })
       .join(", ");
     lines.push(`**Saving Throws** ${saves}`);
   }

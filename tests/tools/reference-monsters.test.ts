@@ -321,6 +321,55 @@ describe("getMonster edition", () => {
   });
 });
 
+describe("getMonster saving throws", () => {
+  it("shouldComputeSavingThrowBonusWhenApiReturnsNullBonusModifier", async () => {
+    // Real D&D Beyond API returns bonusModifier: null for standard (non-overridden)
+    // saving throw proficiencies — the bonus must be derived from ability modifier + proficiency bonus.
+    const monster = monsterVariant({
+      id: 17100,
+      name: "Goblin",
+      isLegacy: false,
+      challengeRatingId: 5, // proficiencyBonus 2 per MOCK_CONFIG
+      savingThrows: [{ statId: 2, bonusModifier: null }], // DEX 14 -> mod +2
+    });
+    const mockClient = createRoutingMockClient([
+      {
+        accessType: { "17100": 1 },
+        pagination: { take: 5, skip: 0, currentPage: 1, pages: 1, total: 1 },
+        data: [monster],
+      },
+      { accessType: 1, data: monster },
+    ]);
+
+    const result = await getMonster(mockClient, { monsterName: "Goblin" });
+
+    expect(result.content[0].text).toContain("**Saving Throws** DEX +4");
+    expect(result.content[0].text).not.toContain("null");
+  });
+
+  it("shouldUseExplicitBonusModifierWhenApiProvidesOne", async () => {
+    const monster = monsterVariant({
+      id: 17100,
+      name: "Goblin",
+      isLegacy: false,
+      challengeRatingId: 5,
+      savingThrows: [{ statId: 2, bonusModifier: 9 }],
+    });
+    const mockClient = createRoutingMockClient([
+      {
+        accessType: { "17100": 1 },
+        pagination: { take: 5, skip: 0, currentPage: 1, pages: 1, total: 1 },
+        data: [monster],
+      },
+      { accessType: 1, data: monster },
+    ]);
+
+    const result = await getMonster(mockClient, { monsterName: "Goblin" });
+
+    expect(result.content[0].text).toContain("**Saving Throws** DEX +9");
+  });
+});
+
 describe("getMonster", () => {
   it("shouldReturnNotFoundMessageWhenMonsterDoesNotExist", async () => {
     const mockClient = createRoutingMockClient([
