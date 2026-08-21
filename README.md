@@ -2,7 +2,7 @@
 
 A TypeScript MCP (Model Context Protocol) server for D&D Beyond. Gives Claude (and other MCP-compatible AI assistants) access to your D&D Beyond characters, campaigns, spells, monsters, items, and more.
 
-> **This is a fork** of [AlexWorland/dndbeyond-mcp](https://github.com/AlexWorland/dndbeyond-mcp). It adds **edition-aware reference lookups** (2014 vs 2024, resolved via D&D Beyond's `isLegacy` flag) for spells, conditions, and monsters, additional reference tools (races, backgrounds, class features, racial traits, source books), a resumable **compendium snapshot downloader**, and makes **`check_auth` a real session-liveness probe**. It is the MCP backend for [dndtools](https://github.com/dmjohnston89/dndtools) and is **built from source** (not published to npm — see Installation). Released via annotated tags (current: **`v0.5.0`**); see [Fork changes](#fork-changes).
+> **This is a fork** of [AlexWorland/dndbeyond-mcp](https://github.com/AlexWorland/dndbeyond-mcp). It adds **edition-aware reference lookups** (2014 vs 2024, resolved via D&D Beyond's `isLegacy` flag) for spells, conditions, and monsters, additional reference tools (races, backgrounds, class features, racial traits, source books), a resumable **compendium snapshot downloader**, **damage/condition resistances in monster stat blocks**, and makes **`check_auth` a real session-liveness probe**. It is the MCP backend for [dndtools](https://github.com/dmjohnston89/dndtools) and is **built from source** (not published to npm — see Installation). Released via annotated tags (current: **`v0.6.0`**); see [Fork changes](#fork-changes).
 
 > **Disclaimer:** This project uses unofficial, reverse-engineered D&D Beyond endpoints. It is not affiliated with, endorsed by, or supported by D&D Beyond or Wizards of the Coast. Endpoints may change without notice.
 
@@ -22,7 +22,7 @@ This fork is **not published to npm**, so `npx dndbeyond-mcp` will not work. Bui
 ```bash
 git clone https://github.com/dmjohnston89/dndbeyond-mcp
 cd dndbeyond-mcp
-git checkout v0.5.0
+git checkout v0.6.0
 npm ci
 npm run build
 ```
@@ -143,6 +143,7 @@ Released as annotated tags (dndtools pins one by tag):
 - **`v0.4.0`** — `check_auth` is now a **real session-liveness probe**: it performs a cobalt-token exchange against D&D Beyond rather than only checking whether a config file exists, so callers can detect an expired-but-present cookie.
 - **`v0.4.1`** — Dependency audit fix (`npm audit fix`); dropped the unused `undici` dependency.
 - **`v0.5.0`** — Added `search_races`, `search_backgrounds`, `search_class_features`, `search_racial_traits`, and `list_sources` reference tools, and a resumable **compendium snapshot downloader** (`npm run compendium:download`) that exports spells/monsters/items/classes/feats/races/backgrounds/game-config as structured JSON.
+- **`v0.6.0`** — `get_monster` now includes **damage resistances/immunities/vulnerabilities and condition immunities** (previously fetched but discarded); fixed monster **saving-throw bonuses** rendering as `+null` for standard (non-overridden) proficiencies by computing them from the ability modifier and CR proficiency bonus.
 
 ## Security
 
