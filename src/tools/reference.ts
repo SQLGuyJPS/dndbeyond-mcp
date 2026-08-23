@@ -64,6 +64,21 @@ async function getGameConfig(client: DdbClient): Promise<GameConfig> {
   return cachedConfig;
 }
 
+/**
+ * Like getGameConfig, but swallows fetch failures. Classes, backgrounds, feats,
+ * class features, and racial traits only need config for optional edition
+ * tagging/derivation (source-category lookup) — not to fetch their own data — so
+ * if the config endpoint is unreachable those searches should still return
+ * results (just without edition tags) rather than fail outright.
+ */
+async function getGameConfigSafe(client: DdbClient): Promise<GameConfig | undefined> {
+  try {
+    return await getGameConfig(client);
+  } catch {
+    return undefined;
+  }
+}
+
 function resolveSourceId(config: GameConfig, source?: string): number | undefined {
   if (!source) return undefined;
   const q = source.toLowerCase().trim();
@@ -527,7 +542,7 @@ export function isLegacyBySource(config: GameConfig | undefined, sources?: Array
  * collapseByEdition just like monsters, items, races, and spells.
  */
 function withLegacyFlag<T extends { sources?: Array<{ sourceId: number }> }>(
-  config: GameConfig,
+  config: GameConfig | undefined,
   items: T[],
 ): (T & { isLegacy: boolean })[] {
   return items.map((item) => ({ ...item, isLegacy: isLegacyBySource(config, item.sources) }));
@@ -1051,7 +1066,7 @@ export async function searchFeats(
     86_400_000,
   );
 
-  const config = await getGameConfig(client);
+  const config = await getGameConfigSafe(client);
   let matched = withLegacyFlag(config, feats ?? []);
 
   if (params.name) {
@@ -1105,7 +1120,7 @@ export async function getFeat(
     86_400_000,
   );
 
-  const config = await getGameConfig(client);
+  const config = await getGameConfigSafe(client);
   const annotated = withLegacyFlag(config, feats ?? []);
 
   const searchName = params.featName.toLowerCase();
@@ -1465,7 +1480,7 @@ export async function searchClasses(
     86_400_000,
   );
 
-  const config = await getGameConfig(client);
+  const config = await getGameConfigSafe(client);
   let matched = withLegacyFlag(config, classes ?? []);
 
   if (params.className) {
@@ -1519,7 +1534,7 @@ export async function getClass(
     86_400_000,
   );
 
-  const config = await getGameConfig(client);
+  const config = await getGameConfigSafe(client);
   const annotated = withLegacyFlag(config, classes ?? []);
 
   const searchName = params.className.toLowerCase();
@@ -1729,7 +1744,7 @@ export async function searchBackgrounds(
     86_400_000,
   );
 
-  const config = await getGameConfig(client);
+  const config = await getGameConfigSafe(client);
   let matched = withLegacyFlag(config, backgrounds ?? []);
 
   if (params.name) {
@@ -1777,7 +1792,7 @@ export async function getBackground(
     86_400_000,
   );
 
-  const config = await getGameConfig(client);
+  const config = await getGameConfigSafe(client);
   const annotated = withLegacyFlag(config, backgrounds ?? []);
 
   const searchName = params.backgroundName.toLowerCase();
@@ -1846,7 +1861,7 @@ export async function searchClassFeatures(
     86_400_000,
   );
 
-  const config = await getGameConfig(client);
+  const config = await getGameConfigSafe(client);
   let matched = withLegacyFlag(config, features ?? []);
 
   if (params.name) {
@@ -1929,7 +1944,7 @@ export async function searchRacialTraits(
     86_400_000,
   );
 
-  const config = await getGameConfig(client);
+  const config = await getGameConfigSafe(client);
   let matched = withLegacyFlag(config, traits ?? []);
 
   if (params.name) {
