@@ -1,5 +1,5 @@
 import { DdbClient } from "../api/client.js";
-import { SpellSearchParams, MonsterSearchParams, ItemSearchParams, FeatSearchParams, RaceSearchParams, BackgroundSearchParams, ClassFeatureSearchParams, RacialTraitSearchParams } from "../types/reference.js";
+import { SpellSearchParams, MonsterSearchParams, ItemSearchParams, FeatSearchParams, ClassSearchParams, RaceSearchParams, BackgroundSearchParams, ClassFeatureSearchParams, RacialTraitSearchParams, Edition } from "../types/reference.js";
 import { DdbCharacter, DdbSpell } from "../types/character.js";
 import { ENDPOINTS } from "../api/endpoints.js";
 
@@ -17,7 +17,7 @@ interface GameConfig {
   alignments: Array<{ id: number; name: string }>;
   damageTypes: Array<{ id: number; name: string }>;
   senses: Array<{ id: number; name: string }>;
-  sources?: Array<{ id: number; name: string }>;
+  sources?: Array<{ id: number; name: string; sourceCategoryId?: number }>;
   damageAdjustments: Array<{ id: number; name: string; type: number }>;
 }
 
@@ -466,7 +466,7 @@ export type EditionRanked = {
  */
 export function pickByEdition<T extends EditionRanked>(
   candidates: T[],
-  edition?: "2014" | "2024",
+  edition?: Edition,
 ): T {
   if (!edition) return candidates[0];
   const wantLegacy = edition === "2014";
@@ -480,7 +480,7 @@ export function pickByEdition<T extends EditionRanked>(
  */
 export function collapseByEdition<T extends EditionRanked>(
   monsters: T[],
-  edition?: "2014" | "2024",
+  edition?: Edition,
 ): T[] {
   if (!edition) return monsters;
   const byName = new Map<string, T[]>();
@@ -499,6 +499,52 @@ export function collapseByEdition<T extends EditionRanked>(
     out.push(pickByEdition(byName.get(key)!, edition));
   }
   return out;
+}
+
+// D&D Beyond source-category IDs that distinguish 2014 ("5e") rulebooks from 2024
+// ("5.5e") ones — see the `sourceCategories` list at /api/config/json. The current-
+// edition counterparts are category 24 ("5.5e Core Rules") and 38 ("5.5e Expanded
+// Rules"); everything outside both sets (homebrew, campaign settings, Critical
+// Role, etc.) isn't tied to a specific edition and defaults to non-legacy below.
+const LEGACY_SOURCE_CATEGORY_IDS = new Set([1, 23, 26]); // 5e Expanded Rules, Legacy/Noncore, 5e Core Rules
+
+/**
+ * Derives 2014-vs-2024 edition status from an entity's primary source book, for
+ * entity types (classes, backgrounds, feats, ...) whose game-data payload doesn't
+ * carry an explicit `isLegacy` flag the way monsters/items/races/spells do. Falls
+ * back to non-legacy (2024) when the source or its category is unrecognized.
+ */
+export function isLegacyBySource(config: GameConfig | undefined, sources?: Array<{ sourceId: number }>): boolean {
+  const sourceId = sources?.[0]?.sourceId;
+  if (sourceId === undefined) return false;
+  const categoryId = config?.sources?.find((s) => s.id === sourceId)?.sourceCategoryId;
+  return categoryId !== undefined && LEGACY_SOURCE_CATEGORY_IDS.has(categoryId);
+}
+
+/**
+ * Annotates entities that carry a `sources` list (but no native `isLegacy` field)
+ * with a computed `isLegacy` flag, making them usable with pickByEdition /
+ * collapseByEdition just like monsters, items, races, and spells.
+ */
+function withLegacyFlag<T extends { sources?: Array<{ sourceId: number }> }>(
+  config: GameConfig,
+  items: T[],
+): (T & { isLegacy: boolean })[] {
+  return items.map((item) => ({ ...item, isLegacy: isLegacyBySource(config, item.sources) }));
+}
+
+/**
+ * Formats an edition-indicator suffix for a list row. With no edition requested,
+ * legacy entries are always tagged "(Legacy)" so same-name 2014/2024 rows (e.g. two
+ * "Fighter" classes) stay distinguishable. With an edition requested, results have
+ * already been collapsed to one row per name, so the tag only appears when that row
+ * had to fall back to the other edition because no matching variant exists.
+ */
+function editionSuffix(isLegacy: boolean, edition?: Edition): string {
+  if (edition) {
+    return Boolean(isLegacy) !== (edition === "2014") ? (isLegacy ? " [2014]" : " [2024]") : "";
+  }
+  return isLegacy ? " *(Legacy)*" : "";
 }
 
 /**
@@ -825,6 +871,7 @@ interface DdbItem {
   sources: Array<{ sourceId: number }>;
   canAttune: boolean;
   magic: boolean;
+  isLegacy: boolean;
 }
 
 /**
@@ -868,6 +915,10 @@ export async function searchItems(
     matched = id === undefined ? [] : matched.filter((i) => i.sources?.some((s) => s.sourceId === id));
   }
 
+  // Edition: collapse cross-edition duplicates (e.g. two "Bag of Holding" rows) to
+  // the selected edition.
+  matched = collapseByEdition(matched, params.edition);
+
   // Sort by name
   matched.sort((a, b) => a.name.localeCompare(b.name));
 
@@ -887,7 +938,8 @@ export async function searchItems(
   const lines = [`# Item Search Results (${header})\n`];
   for (const item of matched) {
     const attune = item.requiresAttunement ? " (attunement)" : "";
-    lines.push(`- **${item.name}** — ${item.rarity || "Common"} ${item.filterType || item.type || ""}${attune} [#${item.id}]`);
+    const editionTag = editionSuffix(Boolean(item.isLegacy), params.edition);
+    lines.push(`- **${item.name}**${editionTag} — ${item.rarity || "Common"} ${item.filterType || item.type || ""}${attune} [#${item.id}]`);
   }
 
   return {
@@ -900,7 +952,7 @@ export async function searchItems(
  */
 export async function getItem(
   client: DdbClient,
-  params: { itemName: string }
+  params: { itemName: string; edition?: Edition }
 ): Promise<ToolResult> {
   const cacheKey = "game-data:items";
   const items = await client.get<DdbItem[]>(
@@ -910,16 +962,21 @@ export async function getItem(
   );
 
   const searchName = params.itemName.toLowerCase();
-  let item = (items ?? []).find((i) => i.name.toLowerCase() === searchName);
-  if (!item) {
-    item = (items ?? []).find((i) => i.name.toLowerCase().includes(searchName));
+
+  // Gather all name matches (exact first, else substring) so we can pick the
+  // edition-correct variant instead of just taking the first hit.
+  let candidates = (items ?? []).filter((i) => i.name.toLowerCase() === searchName);
+  if (candidates.length === 0) {
+    candidates = (items ?? []).filter((i) => i.name.toLowerCase().includes(searchName));
   }
 
-  if (!item) {
+  if (candidates.length === 0) {
     return {
       content: [{ type: "text", text: `Item "${params.itemName}" not found.` }],
     };
   }
+
+  const item = pickByEdition(candidates, params.edition);
 
   const lines: string[] = [];
   lines.push(`# ${item.name}`);
@@ -958,9 +1015,26 @@ interface DdbFeat {
   name: string;
   description: string;
   snippet: string;
-  prerequisite: string | null;
+  /** Legacy shape from older mocks/tests: a single precomputed string. */
+  prerequisite?: string | null;
+  /** Real D&D Beyond payload shape: zero or more structured prerequisite entries. */
+  prerequisites?: Array<{ description: string }>;
   isHomebrew: boolean;
   sources: Array<{ sourceId: number }>;
+  categories?: Array<{ tagName: string }>;
+}
+
+/**
+ * Normalizes a feat's prerequisite text. D&D Beyond's live payload nests it under
+ * `prerequisites[].description`; `prerequisite` (scalar) is kept for callers/tests
+ * using the older shape.
+ */
+function featPrerequisiteText(feat: DdbFeat): string | null {
+  if (feat.prerequisites && feat.prerequisites.length > 0) {
+    const text = feat.prerequisites.map((p) => p.description).filter(Boolean).join("; ");
+    if (text) return text;
+  }
+  return feat.prerequisite ?? null;
 }
 
 /**
@@ -977,7 +1051,8 @@ export async function searchFeats(
     86_400_000,
   );
 
-  let matched = feats ?? [];
+  const config = await getGameConfig(client);
+  let matched = withLegacyFlag(config, feats ?? []);
 
   if (params.name) {
     const searchName = params.name.toLowerCase();
@@ -986,10 +1061,12 @@ export async function searchFeats(
 
   if (params.prerequisite) {
     const searchPrereq = params.prerequisite.toLowerCase();
-    matched = matched.filter(
-      (f) => f.prerequisite?.toLowerCase().includes(searchPrereq)
-    );
+    matched = matched.filter((f) => featPrerequisiteText(f)?.toLowerCase().includes(searchPrereq));
   }
+
+  // Edition: collapse cross-edition duplicates (e.g. two "Chef" feats) to the
+  // selected edition.
+  matched = collapseByEdition(matched, params.edition);
 
   matched.sort((a, b) => a.name.localeCompare(b.name));
 
@@ -1001,11 +1078,62 @@ export async function searchFeats(
 
   const lines = [`# Feat Search Results (${matched.length} found)\n`];
   for (const feat of matched) {
-    const prereq = feat.prerequisite ? ` (Prerequisite: ${feat.prerequisite})` : "";
+    const prereqText = featPrerequisiteText(feat);
+    const prereq = prereqText ? ` (Prerequisite: ${prereqText})` : "";
+    const editionTag = editionSuffix(feat.isLegacy, params.edition);
     const desc = feat.snippet || feat.description || "";
     const shortDesc = stripHtml(desc).substring(0, 80);
-    lines.push(`- **${feat.name}**${prereq} — ${shortDesc}${shortDesc.length >= 80 ? "..." : ""}`);
+    lines.push(`- **${feat.name}**${editionTag}${prereq} — ${shortDesc}${shortDesc.length >= 80 ? "..." : ""}`);
   }
+
+  return {
+    content: [{ type: "text", text: lines.join("\n") }],
+  };
+}
+
+/**
+ * Get full details for a specific feat by name.
+ */
+export async function getFeat(
+  client: DdbClient,
+  params: { featName: string; edition?: Edition }
+): Promise<ToolResult> {
+  const cacheKey = "game-data:feats";
+  const feats = await client.get<DdbFeat[]>(
+    ENDPOINTS.gameData.feats(),
+    cacheKey,
+    86_400_000,
+  );
+
+  const config = await getGameConfig(client);
+  const annotated = withLegacyFlag(config, feats ?? []);
+
+  const searchName = params.featName.toLowerCase();
+  let candidates = annotated.filter((f) => f.name.toLowerCase() === searchName);
+  if (candidates.length === 0) {
+    candidates = annotated.filter((f) => f.name.toLowerCase().includes(searchName));
+  }
+
+  if (candidates.length === 0) {
+    return {
+      content: [{ type: "text", text: `Feat "${params.featName}" not found.` }],
+    };
+  }
+
+  const feat = pickByEdition(candidates, params.edition);
+
+  const lines: string[] = [];
+  const editionLabel = feat.isLegacy ? " *(2014)*" : " *(2024)*";
+  lines.push(`# ${feat.name}${editionLabel}`);
+
+  const prereqText = featPrerequisiteText(feat);
+  if (prereqText) lines.push(`*Prerequisite: ${prereqText}*`);
+
+  const categories = feat.categories?.map((c) => c.tagName).filter(Boolean).join(", ");
+  if (categories) lines.push(`*Category: ${categories}*`);
+
+  lines.push("");
+  lines.push(stripHtml(feat.description || feat.snippet || "No description available."));
 
   return {
     content: [{ type: "text", text: lines.join("\n") }],
@@ -1317,9 +1445,10 @@ interface DdbClass {
   hitDice: number;
   isHomebrew: boolean;
   spellCastingAbilityId: number | null;
+  primaryAbilities?: number[];
   subclasses?: Array<{ id: number; name: string; description: string }>;
   sources: Array<{ sourceId: number }>;
-  classFeatures?: Array<{ id: number; name: string; description: string; level: number }>;
+  classFeatures?: Array<{ id: number; name: string; description: string; requiredLevel: number }>;
 }
 
 /**
@@ -1327,7 +1456,7 @@ interface DdbClass {
  */
 export async function searchClasses(
   client: DdbClient,
-  params: { className?: string }
+  params: ClassSearchParams
 ): Promise<ToolResult> {
   const cacheKey = "game-data:classes";
   const classes = await client.get<DdbClass[]>(
@@ -1336,12 +1465,17 @@ export async function searchClasses(
     86_400_000,
   );
 
-  let matched = classes ?? [];
+  const config = await getGameConfig(client);
+  let matched = withLegacyFlag(config, classes ?? []);
 
   if (params.className) {
     const searchName = params.className.toLowerCase();
     matched = matched.filter((c) => c.name.toLowerCase().includes(searchName));
   }
+
+  // Edition: collapse cross-edition duplicates (e.g. two "Fighter" classes) to the
+  // selected edition.
+  matched = collapseByEdition(matched, params.edition);
 
   matched.sort((a, b) => a.name.localeCompare(b.name));
 
@@ -1357,10 +1491,80 @@ export async function searchClasses(
     const spellcasting = cls.spellCastingAbilityId
       ? ` | Spellcasting: ${STAT_NAMES[cls.spellCastingAbilityId] || "Yes"}`
       : "";
-    lines.push(`- **${cls.name}** — Hit Die: ${hitDie}${spellcasting}`);
+    const editionTag = editionSuffix(cls.isLegacy, params.edition);
+    lines.push(`- **${cls.name}**${editionTag} — Hit Die: ${hitDie}${spellcasting}`);
 
     const desc = stripHtml(cls.description || "").substring(0, 100);
     if (desc) lines.push(`  ${desc}${desc.length >= 100 ? "..." : ""}`);
+  }
+
+  return {
+    content: [{ type: "text", text: lines.join("\n") }],
+  };
+}
+
+/**
+ * Get full details for a specific class, including its level-by-level class
+ * features — useful for comparing how a class changed between the 2014 and 2024
+ * rules (e.g. the Ranger's Favored Enemy).
+ */
+export async function getClass(
+  client: DdbClient,
+  params: { className: string; edition?: Edition }
+): Promise<ToolResult> {
+  const cacheKey = "game-data:classes";
+  const classes = await client.get<DdbClass[]>(
+    ENDPOINTS.gameData.classes(),
+    cacheKey,
+    86_400_000,
+  );
+
+  const config = await getGameConfig(client);
+  const annotated = withLegacyFlag(config, classes ?? []);
+
+  const searchName = params.className.toLowerCase();
+  let candidates = annotated.filter((c) => c.name.toLowerCase() === searchName);
+  if (candidates.length === 0) {
+    candidates = annotated.filter((c) => c.name.toLowerCase().includes(searchName));
+  }
+
+  if (candidates.length === 0) {
+    return {
+      content: [{ type: "text", text: `Class "${params.className}" not found.` }],
+    };
+  }
+
+  const cls = pickByEdition(candidates, params.edition);
+
+  const lines: string[] = [];
+  const editionLabel = cls.isLegacy ? " *(2014)*" : " *(2024)*";
+  lines.push(`# ${cls.name}${editionLabel}`);
+
+  const hitDie = cls.hitDice ? `d${cls.hitDice}` : "?";
+  lines.push(`**Hit Die:** ${hitDie}`);
+
+  if (cls.primaryAbilities && cls.primaryAbilities.length > 0) {
+    const abilities = cls.primaryAbilities.map((id) => STAT_NAMES[id] ?? id).join(", ");
+    lines.push(`**Primary Abilities:** ${abilities}`);
+  }
+
+  if (cls.spellCastingAbilityId) {
+    lines.push(`**Spellcasting Ability:** ${STAT_NAMES[cls.spellCastingAbilityId] ?? "Yes"}`);
+  }
+
+  if (cls.description) {
+    lines.push("");
+    lines.push(stripHtml(cls.description));
+  }
+
+  if (cls.classFeatures && cls.classFeatures.length > 0) {
+    lines.push("\n## Class Features\n");
+    const byLevel = [...cls.classFeatures].sort((a, b) => (a.requiredLevel ?? 0) - (b.requiredLevel ?? 0));
+    for (const feature of byLevel) {
+      lines.push(`### Level ${feature.requiredLevel ?? "?"}: ${feature.name}`);
+      lines.push(stripHtml(feature.description || ""));
+      lines.push("");
+    }
   }
 
   return {
@@ -1377,15 +1581,27 @@ interface DdbRace {
   baseName: string;
   baseRaceName: string;
   description: string;
+  longDescription?: string;
   isHomebrew: boolean;
   isLegacy: boolean;
   isSubRace: boolean;
   size: string;
   sources: Array<{ sourceId: number }>;
+  racialTraits?: Array<{
+    definition: { name: string; description: string; hideOnDetailsPage?: boolean };
+  }>;
+}
+
+/** Races/species are keyed by fullName/baseName rather than `name`; normalize so
+ * pickByEdition/collapseByEdition (which key off `name`) work here too. */
+function withRaceName<T extends { fullName: string; baseName: string }>(
+  race: T,
+): T & { name: string } {
+  return { ...race, name: race.fullName || race.baseName };
 }
 
 /**
- * Search for character races.
+ * Search for character races (species, in 2024 terminology).
  */
 export async function searchRaces(
   client: DdbClient,
@@ -1398,16 +1614,17 @@ export async function searchRaces(
     86_400_000,
   );
 
-  let matched = (races ?? []).filter((r) => r.fullName || r.baseName);
+  let matched = (races ?? []).filter((r) => r.fullName || r.baseName).map(withRaceName);
 
   if (params.name) {
     const searchName = params.name.toLowerCase();
-    matched = matched.filter((r) =>
-      (r.fullName || r.baseName).toLowerCase().includes(searchName)
-    );
+    matched = matched.filter((r) => r.name.toLowerCase().includes(searchName));
   }
 
-  matched.sort((a, b) => (a.fullName || a.baseName).localeCompare(b.fullName || b.baseName));
+  // Edition: collapse cross-edition duplicates to the selected edition.
+  matched = collapseByEdition(matched, params.edition);
+
+  matched.sort((a, b) => a.name.localeCompare(b.name));
 
   if (matched.length === 0) {
     return {
@@ -1417,10 +1634,63 @@ export async function searchRaces(
 
   const lines = [`# Race Search Results (${matched.length} found)\n`];
   for (const race of matched) {
-    const name = race.fullName || race.baseName;
     const desc = stripHtml(race.description || "").substring(0, 100);
-    const legacy = race.isLegacy ? " *(Legacy)*" : "";
-    lines.push(`- **${name}**${legacy} — ${desc}${desc.length >= 100 ? "..." : ""}`);
+    const legacy = editionSuffix(race.isLegacy, params.edition);
+    lines.push(`- **${race.name}**${legacy} — ${desc}${desc.length >= 100 ? "..." : ""}`);
+  }
+
+  return {
+    content: [{ type: "text", text: lines.join("\n") }],
+  };
+}
+
+/**
+ * Get full details for a specific race/species by name, including its racial
+ * traits.
+ */
+export async function getRace(
+  client: DdbClient,
+  params: { raceName: string; edition?: Edition }
+): Promise<ToolResult> {
+  const cacheKey = "game-data:races";
+  const races = await client.get<DdbRace[]>(
+    ENDPOINTS.gameData.races(),
+    cacheKey,
+    86_400_000,
+  );
+
+  const named = (races ?? []).filter((r) => r.fullName || r.baseName).map(withRaceName);
+
+  const searchName = params.raceName.toLowerCase();
+  let candidates = named.filter((r) => r.name.toLowerCase() === searchName);
+  if (candidates.length === 0) {
+    candidates = named.filter((r) => r.name.toLowerCase().includes(searchName));
+  }
+
+  if (candidates.length === 0) {
+    return {
+      content: [{ type: "text", text: `Race "${params.raceName}" not found.` }],
+    };
+  }
+
+  const race = pickByEdition(candidates, params.edition);
+
+  const lines: string[] = [];
+  const editionLabel = race.isLegacy ? " *(2014)*" : " *(2024)*";
+  lines.push(`# ${race.name}${editionLabel}`);
+  if (race.size) lines.push(`*${race.size}*`);
+
+  lines.push("");
+  lines.push(stripHtml(race.longDescription || race.description || "No description available."));
+
+  const traits = (race.racialTraits ?? [])
+    .map((t) => t.definition)
+    .filter((d) => d && d.name && d.description);
+  if (traits.length > 0) {
+    lines.push("\n## Traits\n");
+    for (const trait of traits) {
+      lines.push(`**${trait.name}.** ${stripHtml(trait.description)}`);
+    }
   }
 
   return {
@@ -1436,6 +1706,13 @@ interface DdbBackground {
   description: string;
   isHomebrew: boolean;
   sources: Array<{ sourceId: number }>;
+  primaryAbilities?: number[];
+  skillProficienciesDescription?: string;
+  toolProficienciesDescription?: string;
+  languagesDescription?: string;
+  equipmentDescription?: string;
+  featureName?: string;
+  featureDescription?: string;
 }
 
 /**
@@ -1452,12 +1729,17 @@ export async function searchBackgrounds(
     86_400_000,
   );
 
-  let matched = backgrounds ?? [];
+  const config = await getGameConfig(client);
+  let matched = withLegacyFlag(config, backgrounds ?? []);
 
   if (params.name) {
     const searchName = params.name.toLowerCase();
     matched = matched.filter((b) => b.name.toLowerCase().includes(searchName));
   }
+
+  // Edition: collapse cross-edition duplicates (e.g. two "Noble" backgrounds) to
+  // the selected edition.
+  matched = collapseByEdition(matched, params.edition);
 
   matched.sort((a, b) => a.name.localeCompare(b.name));
 
@@ -1470,8 +1752,66 @@ export async function searchBackgrounds(
   const lines = [`# Background Search Results (${matched.length} found)\n`];
   for (const bg of matched) {
     const desc = stripHtml(bg.description || "").substring(0, 100);
-    lines.push(`- **${bg.name}** — ${desc}${desc.length >= 100 ? "..." : ""}`);
+    const editionTag = editionSuffix(bg.isLegacy, params.edition);
+    lines.push(`- **${bg.name}**${editionTag} — ${desc}${desc.length >= 100 ? "..." : ""}`);
   }
+
+  return {
+    content: [{ type: "text", text: lines.join("\n") }],
+  };
+}
+
+/**
+ * Get full details for a specific background by name, including its ability
+ * score choices, proficiencies, and granted feature — useful for questions like
+ * "what ability scores does the 2024 Noble background offer?"
+ */
+export async function getBackground(
+  client: DdbClient,
+  params: { backgroundName: string; edition?: Edition }
+): Promise<ToolResult> {
+  const cacheKey = "game-data:backgrounds";
+  const backgrounds = await client.get<DdbBackground[]>(
+    ENDPOINTS.gameData.backgrounds(),
+    cacheKey,
+    86_400_000,
+  );
+
+  const config = await getGameConfig(client);
+  const annotated = withLegacyFlag(config, backgrounds ?? []);
+
+  const searchName = params.backgroundName.toLowerCase();
+  let candidates = annotated.filter((b) => b.name.toLowerCase() === searchName);
+  if (candidates.length === 0) {
+    candidates = annotated.filter((b) => b.name.toLowerCase().includes(searchName));
+  }
+
+  if (candidates.length === 0) {
+    return {
+      content: [{ type: "text", text: `Background "${params.backgroundName}" not found.` }],
+    };
+  }
+
+  const bg = pickByEdition(candidates, params.edition);
+
+  const lines: string[] = [];
+  const editionLabel = bg.isLegacy ? " *(2014)*" : " *(2024)*";
+  lines.push(`# ${bg.name}${editionLabel}`);
+
+  if (bg.primaryAbilities && bg.primaryAbilities.length > 0) {
+    const abilities = bg.primaryAbilities.map((id) => STAT_NAMES[id] ?? id).join(", ");
+    lines.push(`**Ability Score Choices:** ${abilities}`);
+  }
+  if (bg.skillProficienciesDescription) lines.push(`**Skill Proficiencies:** ${stripHtml(bg.skillProficienciesDescription)}`);
+  if (bg.toolProficienciesDescription) lines.push(`**Tool Proficiencies:** ${stripHtml(bg.toolProficienciesDescription)}`);
+  if (bg.languagesDescription) lines.push(`**Languages:** ${stripHtml(bg.languagesDescription)}`);
+  if (bg.equipmentDescription) lines.push(`**Equipment:** ${stripHtml(bg.equipmentDescription)}`);
+  if (bg.featureName) {
+    lines.push(`**Feature: ${bg.featureName}**${bg.featureDescription ? " " + stripHtml(bg.featureDescription) : ""}`);
+  }
+
+  lines.push("");
+  lines.push(stripHtml(bg.description || "No description available."));
 
   return {
     content: [{ type: "text", text: lines.join("\n") }],
@@ -1506,7 +1846,8 @@ export async function searchClassFeatures(
     86_400_000,
   );
 
-  let matched = features ?? [];
+  const config = await getGameConfig(client);
+  let matched = withLegacyFlag(config, features ?? []);
 
   if (params.name) {
     const searchName = params.name.toLowerCase();
@@ -1523,6 +1864,10 @@ export async function searchClassFeatures(
   if (params.level !== undefined) {
     matched = matched.filter((f) => f.requiredLevel === params.level);
   }
+
+  // Edition: collapse cross-edition duplicates (same class/level/name) to the
+  // selected edition.
+  matched = collapseByEdition(matched, params.edition);
 
   matched.sort((a, b) => {
     // Sort by class name, then by level, then by feature name
@@ -1545,7 +1890,8 @@ export async function searchClassFeatures(
   for (const feature of matched) {
     const className = feature.className || "Unknown";
     const level = feature.requiredLevel || "?";
-    lines.push(`- **${feature.name}** — ${className} level ${level}`);
+    const editionTag = editionSuffix(feature.isLegacy, params.edition);
+    lines.push(`- **${feature.name}**${editionTag} — ${className} level ${level}`);
 
     const desc = stripHtml(feature.snippet || feature.description || "").substring(0, 100);
     if (desc) lines.push(`  ${desc}${desc.length >= 100 ? "..." : ""}`);
@@ -1583,7 +1929,8 @@ export async function searchRacialTraits(
     86_400_000,
   );
 
-  let matched = traits ?? [];
+  const config = await getGameConfig(client);
+  let matched = withLegacyFlag(config, traits ?? []);
 
   if (params.name) {
     const searchName = params.name.toLowerCase();
@@ -1596,6 +1943,10 @@ export async function searchRacialTraits(
       (t) => t.raceName?.toLowerCase().includes(searchRace)
     );
   }
+
+  // Edition: collapse cross-edition duplicates (same race/trait name) to the
+  // selected edition.
+  matched = collapseByEdition(matched, params.edition);
 
   matched.sort((a, b) => {
     // Sort by race name, then by trait name
@@ -1616,7 +1967,8 @@ export async function searchRacialTraits(
   const lines = [`# Racial Trait Search Results (${total > 30 ? `showing 30 of ${total}` : `${total} found`})\n`];
   for (const trait of matched) {
     const raceName = trait.raceName || "Unknown";
-    lines.push(`- **${trait.name}** — ${raceName}`);
+    const editionTag = editionSuffix(trait.isLegacy, params.edition);
+    lines.push(`- **${trait.name}**${editionTag} — ${raceName}`);
 
     const desc = stripHtml(trait.snippet || trait.description || "").substring(0, 100);
     if (desc) lines.push(`  ${desc}${desc.length >= 100 ? "..." : ""}`);

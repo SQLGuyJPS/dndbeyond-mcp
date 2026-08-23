@@ -53,10 +53,14 @@ import {
   getItem,
   listSources,
   searchFeats,
+  getFeat,
   getCondition,
   searchClasses,
+  getClass,
   searchRaces,
+  getRace,
   searchBackgrounds,
+  getBackground,
   searchClassFeatures,
   searchRacialTraits,
 } from "./tools/reference.js";
@@ -768,6 +772,13 @@ export async function startServer(): Promise<void> {
       })
   );
 
+  // A rules edition selector shared by every entity that can have both a 2014
+  // ("legacy") and 2024 ("current") variant.
+  const editionParam = z
+    .enum(["2014", "2024"])
+    .optional()
+    .describe("Rules edition to prefer: 2024 (current) or 2014 (legacy). Collapses cross-edition duplicates / selects the matching variant when both exist.");
+
   // Register reference tools - items
   server.tool(
     "search_items",
@@ -786,6 +797,7 @@ export async function startServer(): Promise<void> {
         .describe("Item type (weapon, armor, potion, ring, etc.)"),
       source: z.string().optional().describe("Source book name (e.g., 'Dungeon Master\\'s Guide')"),
       page: z.coerce.number().optional().describe("Page number (default: 1, 30 results per page)"),
+      edition: editionParam,
     },
     async (params) =>
       searchItems(client, {
@@ -794,6 +806,7 @@ export async function startServer(): Promise<void> {
         type: params.type,
         source: params.source,
         page: params.page,
+        edition: params.edition,
       })
   );
 
@@ -802,10 +815,12 @@ export async function startServer(): Promise<void> {
     "Get full details for a specific magic item by name",
     {
       itemName: z.string().describe("The item name"),
+      edition: editionParam,
     },
     async (params) =>
       getItem(client, {
         itemName: params.itemName,
+        edition: params.edition,
       })
   );
 
@@ -822,10 +837,28 @@ export async function startServer(): Promise<void> {
     "Search for feats by name",
     {
       name: z.string().optional().describe("Feat name (partial match)"),
+      prerequisite: z.string().optional().describe("Prerequisite text to filter by (e.g., 'Strength 13')"),
+      edition: editionParam,
     },
     async (params) =>
       searchFeats(client, {
         name: params.name,
+        prerequisite: params.prerequisite,
+        edition: params.edition,
+      })
+  );
+
+  server.tool(
+    "get_feat",
+    "Get full details for a specific feat by name",
+    {
+      featName: z.string().describe("The feat name"),
+      edition: editionParam,
+    },
+    async (params) =>
+      getFeat(client, {
+        featName: params.featName,
+        edition: params.edition,
       })
   );
 
@@ -855,23 +888,55 @@ export async function startServer(): Promise<void> {
     "Search for character classes and subclasses",
     {
       className: z.string().optional().describe("Class name (partial match)"),
+      edition: editionParam,
     },
     async (params) =>
       searchClasses(client, {
         className: params.className,
+        edition: params.edition,
+      })
+  );
+
+  server.tool(
+    "get_class",
+    "Get full details for a specific class, including its level-by-level class features. Useful for comparing how a class changed between the 2014 and 2024 rules.",
+    {
+      className: z.string().describe("The class name"),
+      edition: editionParam,
+    },
+    async (params) =>
+      getClass(client, {
+        className: params.className,
+        edition: params.edition,
       })
   );
 
   // Register reference tools - races
   server.tool(
     "search_races",
-    "Search for character races by name",
+    "Search for character races by name (called 'species' in the 2024 rules)",
     {
-      name: z.string().optional().describe("Race name (partial match)"),
+      name: z.string().optional().describe("Race/species name (partial match)"),
+      edition: editionParam,
     },
     async (params) =>
       searchRaces(client, {
         name: params.name,
+        edition: params.edition,
+      })
+  );
+
+  server.tool(
+    "get_race",
+    "Get full details for a specific race/species by name, including its racial traits",
+    {
+      raceName: z.string().describe("The race/species name"),
+      edition: editionParam,
+    },
+    async (params) =>
+      getRace(client, {
+        raceName: params.raceName,
+        edition: params.edition,
       })
   );
 
@@ -881,10 +946,26 @@ export async function startServer(): Promise<void> {
     "Search for character backgrounds by name",
     {
       name: z.string().optional().describe("Background name (partial match)"),
+      edition: editionParam,
     },
     async (params) =>
       searchBackgrounds(client, {
         name: params.name,
+        edition: params.edition,
+      })
+  );
+
+  server.tool(
+    "get_background",
+    "Get full details for a specific background by name, including ability score choices, proficiencies, and its granted feature",
+    {
+      backgroundName: z.string().describe("The background name"),
+      edition: editionParam,
+    },
+    async (params) =>
+      getBackground(client, {
+        backgroundName: params.backgroundName,
+        edition: params.edition,
       })
   );
 
@@ -896,12 +977,14 @@ export async function startServer(): Promise<void> {
       name: z.string().optional().describe("Feature name (partial match)"),
       className: z.string().optional().describe("Class name to filter by (e.g., 'Fighter', 'Wizard')"),
       level: z.coerce.number().optional().describe("Class level requirement"),
+      edition: editionParam,
     },
     async (params) =>
       searchClassFeatures(client, {
         name: params.name,
         className: params.className,
         level: params.level,
+        edition: params.edition,
       })
   );
 
@@ -912,11 +995,13 @@ export async function startServer(): Promise<void> {
     {
       name: z.string().optional().describe("Trait name (partial match)"),
       raceName: z.string().optional().describe("Race name to filter by (e.g., 'Elf', 'Dwarf')"),
+      edition: editionParam,
     },
     async (params) =>
       searchRacialTraits(client, {
         name: params.name,
         raceName: params.raceName,
+        edition: params.edition,
       })
   );
 

@@ -2,7 +2,7 @@
 
 A TypeScript MCP (Model Context Protocol) server for D&D Beyond. Gives Claude (and other MCP-compatible AI assistants) access to your D&D Beyond characters, campaigns, spells, monsters, items, and more.
 
-> **This is a fork** of [AlexWorland/dndbeyond-mcp](https://github.com/AlexWorland/dndbeyond-mcp). It adds **edition-aware reference lookups** (2014 vs 2024, resolved via D&D Beyond's `isLegacy` flag) for spells, conditions, and monsters, additional reference tools (races, backgrounds, class features, racial traits, source books), a resumable **compendium snapshot downloader**, **damage/condition resistances in monster stat blocks**, and makes **`check_auth` a real session-liveness probe**. It is the MCP backend for [dndtools](https://github.com/dmjohnston89/dndtools) and is **built from source** (not published to npm — see Installation). Released via annotated tags (current: **`v0.6.0`**); see [Fork changes](#fork-changes).
+> **This is a fork** of [AlexWorland/dndbeyond-mcp](https://github.com/AlexWorland/dndbeyond-mcp). It adds **edition-aware reference lookups** (2014 vs 2024) for spells, conditions, monsters, items, classes, species/races, backgrounds, feats, class features, and racial traits — resolved via D&D Beyond's `isLegacy` flag where present, or derived from the entity's source book otherwise — plus `get_class`, `get_race`, `get_background`, and `get_feat` detail lookups, additional reference tools (races, backgrounds, class features, racial traits, source books), a resumable **compendium snapshot downloader**, **damage/condition resistances in monster stat blocks**, and makes **`check_auth` a real session-liveness probe**. It is the MCP backend for [dndtools](https://github.com/dmjohnston89/dndtools) and is **built from source** (not published to npm — see Installation). Released via annotated tags (current: **`v0.6.0`**); see [Fork changes](#fork-changes).
 
 > **Disclaimer:** This project uses unofficial, reverse-engineered D&D Beyond endpoints. It is not affiliated with, endorsed by, or supported by D&D Beyond or Wizards of the Coast. Endpoints may change without notice.
 
@@ -10,7 +10,7 @@ A TypeScript MCP (Model Context Protocol) server for D&D Beyond. Gives Claude (a
 
 - **Character Management** — Read character sheets, update HP, spell slots, death saves, currency
 - **Campaign Access** — List campaigns, view party rosters
-- **Reference Lookups** — Search and retrieve spells, monsters, magic items, feats, conditions, classes, races, backgrounds, class features, and racial traits — **edition-aware** (2014/2024) for spells, conditions, and monsters
+- **Reference Lookups** — Search and retrieve spells, monsters, magic items, feats, conditions, classes, species/races, backgrounds, class features, and racial traits — **edition-aware** (2014/2024) across all of them, so you can compare rules between editions or pin a lookup to a specific ruleset
 - **Compendium Snapshots** — Download resumable, structured JSON snapshots of D&D Beyond reference data for offline/resilient access
 - **Workflow Prompts** — Session prep, encounter building, level-up guidance, spell recommendations
 - **Browser-Based Auth** — Playwright-powered login flow (no manual cookie extraction)
@@ -96,14 +96,16 @@ After adding the configuration, restart Claude Desktop.
 - `get_campaign_characters` — All characters in a campaign
 
 ### Reference
-- `search_spells` / `get_spell` — Spell lookup with filters; accepts an optional `edition` (`2014`/`2024`)
-- `search_monsters` / `get_monster` — Monster stat blocks; `edition`-aware (collapses cross-edition duplicate names, tags other-edition-only results)
+All `search_*` / `get_*` reference tools below accept an optional `edition` (`2014`/`2024`): on a search it collapses same-name 2014/2024 duplicates to the requested edition (tagging a row only when it had to fall back to the other edition), and with no `edition` given it lists every variant, tagging legacy ones `(Legacy)`; on a `get_*` it selects the matching variant. Classes, species/races, backgrounds, and feats resolve edition via D&D Beyond's native `isLegacy` flag where the API provides one (monsters, items, races, spells), or — for classes, backgrounds, feats, class features, and racial traits, whose payloads don't carry that flag — via the entity's primary source book (2014-ruleset sourcebooks vs. 2024-ruleset ones).
+
+- `search_spells` / `get_spell` — Spell lookup with filters
+- `search_monsters` / `get_monster` — Monster stat blocks
 - `search_items` / `get_item` — Magic item catalog
-- `search_feats` — Feat discovery
+- `search_feats` / `get_feat` — Feat discovery and full feat text
 - `get_condition` — Condition rules; accepts an optional `edition` (`2014`/`2024`, default `2014`)
-- `search_classes` — Class/subclass info
-- `search_races` — Race/species lookup by name
-- `search_backgrounds` — Background lookup by name
+- `search_classes` / `get_class` — Class/subclass info; `get_class` includes the full level-by-level class feature list, useful for comparing e.g. the 2014 vs 2024 Ranger's Favored Enemy
+- `search_races` / `get_race` — Race/species lookup by name; `get_race` includes full racial traits
+- `search_backgrounds` / `get_background` — Background lookup by name; `get_background` includes ability score choices, proficiencies, and the granted feature
 - `search_class_features` — Class feature lookup by name, class, or level
 - `search_racial_traits` — Racial trait lookup by name or race
 - `list_sources` — Source book IDs/names from D&D Beyond config
