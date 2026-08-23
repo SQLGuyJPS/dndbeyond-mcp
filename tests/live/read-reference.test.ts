@@ -8,9 +8,13 @@ import {
   searchItems,
   getItem,
   searchFeats,
+  getFeat,
   searchClasses,
+  getClass,
   searchRaces,
+  getRace,
   searchBackgrounds,
+  getBackground,
   getCondition,
 } from "../../src/tools/reference.js";
 
@@ -116,6 +120,16 @@ describe("Live: Feat endpoints", () => {
 
     expect(text.toLowerCase()).toContain("alert");
   });
+
+  it("should get full feat details", async () => {
+    const client = await getLiveClient();
+    const result = await getFeat(client, { featName: "Chef" });
+    const text = result.content[0].text;
+
+    expect(text).toContain("# Chef");
+    // A real description, not just the not-found fallback.
+    expect(text.length).toBeGreaterThan(50);
+  });
 });
 
 describe("Live: Class endpoints", () => {
@@ -125,6 +139,50 @@ describe("Live: Class endpoints", () => {
     const text = result.content[0].text;
 
     expect(text.toLowerCase()).toContain("wizard");
+  });
+
+  it("should list both editions of a class distinguishably when no edition is given", async () => {
+    const client = await getLiveClient();
+    const result = await searchClasses(client, { className: "fighter" });
+    const text = result.content[0].text;
+
+    // Fighter exists in both the 2014 Basic Rules and the 2024 PHB, and both
+    // are free/owned content, so this account should always see two rows.
+    expect(text.match(/\*\*Fighter\*\*/g)?.length).toBe(2);
+    expect(text).toMatch(/\*\*Fighter\*\* \*\(Legacy\)\*/);
+  });
+
+  it("should collapse to a single edition-matching class when edition is given", async () => {
+    const client = await getLiveClient();
+    const result = await searchClasses(client, { className: "fighter", edition: "2024" });
+    const text = result.content[0].text;
+
+    expect(text.match(/\*\*Fighter\*\*/g)?.length).toBe(1);
+  });
+
+  it("should get edition-specific class descriptions for get_class", async () => {
+    const client = await getLiveClient();
+    const current = await getClass(client, { className: "Fighter", edition: "2024" });
+    const legacy = await getClass(client, { className: "Fighter", edition: "2014" });
+
+    expect(current.content[0].text).toContain("*(2024)*");
+    expect(legacy.content[0].text).toContain("*(2014)*");
+    expect(current.content[0].text).not.toBe(legacy.content[0].text);
+  });
+
+  it("should return the Ranger's edition-specific Favored Enemy feature", async () => {
+    const client = await getLiveClient();
+    const current = await getClass(client, { className: "Ranger", edition: "2024" });
+    const legacy = await getClass(client, { className: "Ranger", edition: "2014" });
+
+    // 2024: Favored Enemy always grants a free casting of the Hunter's Mark
+    // spell. 2014's version is a tracking/language bonus and never mentions
+    // Hunter's Mark — though it does name-drop the (unrelated) Hunter archetype,
+    // so match the specific phrase rather than the bare word "Hunter".
+    const huntersMark = /Hunter.s Mark/;
+    expect(current.content[0].text).toMatch(huntersMark);
+    expect(legacy.content[0].text.toLowerCase()).toContain("favored enemy");
+    expect(legacy.content[0].text).not.toMatch(huntersMark);
   });
 });
 
@@ -138,6 +196,27 @@ describe("Live: Race endpoints", () => {
     expect(text).toBeDefined();
     expect(text.length).toBeGreaterThan(0);
   });
+
+  it("should get full race/species details for the current (2024) Elf", async () => {
+    const client = await getLiveClient();
+    const result = await getRace(client, { raceName: "Elf", edition: "2024" });
+    const text = result.content[0].text;
+
+    expect(text).toContain("# Elf");
+    expect(text).toContain("*(2024)*");
+  });
+
+  it("should get full details and traits for a legacy (2014) subrace", async () => {
+    const client = await getLiveClient();
+    // The 2014 base "Elf" is a non-selectable parent of its subraces on this
+    // account; High Elf is the reliably-present legacy variant.
+    const result = await getRace(client, { raceName: "High Elf", edition: "2014" });
+    const text = result.content[0].text;
+
+    expect(text).toContain("# High Elf");
+    expect(text).toContain("*(2014)*");
+    expect(text).toContain("## Traits");
+  });
 });
 
 describe("Live: Background endpoints", () => {
@@ -147,6 +226,28 @@ describe("Live: Background endpoints", () => {
     const text = result.content[0].text;
 
     expect(text.toLowerCase()).toContain("soldier");
+  });
+
+  it("should return the 2024 Noble's ability score choices", async () => {
+    const client = await getLiveClient();
+    const result = await getBackground(client, { backgroundName: "Noble", edition: "2024" });
+    const text = result.content[0].text;
+
+    expect(text).toContain("*(2024)*");
+    expect(text).toContain("Ability Score Choices:");
+    expect(text).toContain("STR");
+    expect(text).toContain("INT");
+    expect(text).toContain("CHA");
+  });
+
+  it("should return the 2014 Noble's different granted feature", async () => {
+    const client = await getLiveClient();
+    const result = await getBackground(client, { backgroundName: "Noble", edition: "2014" });
+    const text = result.content[0].text;
+
+    expect(text).toContain("*(2014)*");
+    // 2014 Noble grants "Position of Privilege"; 2024 grants the "Skilled" feat.
+    expect(text).toContain("Position of Privilege");
   });
 });
 
