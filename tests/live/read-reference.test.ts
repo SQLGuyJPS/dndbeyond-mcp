@@ -11,6 +11,9 @@ import {
   getFeat,
   searchClasses,
   getClass,
+  searchSubclasses,
+  getSubclass,
+  searchClassFeatures,
   searchRaces,
   getRace,
   searchBackgrounds,
@@ -183,6 +186,62 @@ describe("Live: Class endpoints", () => {
     expect(current.content[0].text).toMatch(huntersMark);
     expect(legacy.content[0].text.toLowerCase()).toContain("favored enemy");
     expect(legacy.content[0].text).not.toMatch(huntersMark);
+  });
+});
+
+describe("Live: Subclass endpoints", () => {
+  // Regression coverage for the gap described in
+  // dndbeyond-mcp-class-feature-handoff.md: subclass features were only
+  // reachable through a character who already had that subclass at a high
+  // enough level. These assert the character-independent path works.
+
+  it("should return every 2024 Oath of Glory feature across all levels, with no character involved", async () => {
+    const client = await getLiveClient();
+    const result = await getSubclass(client, { subclassName: "Oath of Glory", className: "Paladin", edition: "2024" });
+    const text = result.content[0].text;
+
+    expect(text).toContain("# Oath of Glory");
+    expect(text).toContain("*(2024)*");
+    expect(text).toContain("Inspiring Smite");
+    expect(text).toContain("Peerless Athlete");
+    expect(text).toContain("Aura of Alacrity");
+    // The regression case: levels beyond any roster character's actual level.
+    expect(text).toContain("Level 15: Glorious Defense");
+    expect(text).toContain("Level 20: Living Legend");
+    // Inherited base Paladin features must not leak into the subclass's own list.
+    expect(text).not.toContain("Lay On Hands");
+  });
+
+  it("should resolve a subclass without a className, by scanning all classes", async () => {
+    const client = await getLiveClient();
+    const result = await getSubclass(client, { subclassName: "Oath of Glory", edition: "2024" });
+    expect(result.content[0].text).toContain("# Oath of Glory");
+  }, 30_000);
+
+  it("should list every Paladin oath via search_subclasses", async () => {
+    const client = await getLiveClient();
+    const result = await searchSubclasses(client, { className: "Paladin", edition: "2024" });
+    const text = result.content[0].text;
+
+    expect(text).toContain("Oath of Devotion");
+    expect(text).toContain("Oath of Glory");
+  });
+
+  it("should find a subclass feature by name via search_class_features without knowing its class", async () => {
+    const client = await getLiveClient();
+    // This is the exact call that 404'd before the fix (search_class_features
+    // hit a class-feature/collection endpoint that doesn't exist on the live API).
+    const result = await searchClassFeatures(client, { name: "Glory" });
+    const text = result.content[0].text;
+
+    expect(text).toContain("Oath of Glory");
+    expect(text).toMatch(/Paladin \(Oath of Glory\)/);
+  });
+
+  it("should report a not-found message (not throw) for an unowned/nonexistent subclass", async () => {
+    const client = await getLiveClient();
+    const result = await getSubclass(client, { subclassName: "Definitely Not A Real Subclass Xyz", className: "Paladin" });
+    expect(result.content[0].text.toLowerCase()).toContain("not found");
   });
 });
 

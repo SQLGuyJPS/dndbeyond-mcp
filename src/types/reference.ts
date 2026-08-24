@@ -55,6 +55,12 @@ export interface BackgroundSearchParams {
   edition?: Edition;
 }
 
+export interface SubclassSearchParams {
+  name?: string;
+  className?: string;
+  edition?: Edition;
+}
+
 export interface ClassFeatureSearchParams {
   name?: string;
   className?: string;

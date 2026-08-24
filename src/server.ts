@@ -57,6 +57,8 @@ import {
   getCondition,
   searchClasses,
   getClass,
+  searchSubclasses,
+  getSubclass,
   searchRaces,
   getRace,
   searchBackgrounds,
@@ -136,7 +138,7 @@ export async function startServer(): Promise<void> {
 
   server.tool(
     "get_definition",
-    "Look up a specific feat, spell, class feature, racial trait, or item by name (partial match). Returns the full description.",
+    "Look up a specific feat, spell, class feature, racial trait, or item by name (partial match) *as granted to one character* — requires characterId or characterName, and only finds things that character actually has. For a character-independent compendium lookup (works without any character existing), use get_spell, get_feat, get_item, get_background, get_race, get_class, or get_subclass instead.",
     {
       characterId: z.coerce.number().optional().describe("The character ID"),
       characterName: z
@@ -885,7 +887,7 @@ export async function startServer(): Promise<void> {
   // Register reference tools - classes
   server.tool(
     "search_classes",
-    "Search for character classes and subclasses",
+    "Search for base character classes by name (e.g. 'Paladin', 'Wizard'). For subclasses (e.g. 'Oath of Glory'), use search_subclasses or get_subclass instead.",
     {
       className: z.string().optional().describe("Class name (partial match)"),
       edition: editionParam,
@@ -906,6 +908,41 @@ export async function startServer(): Promise<void> {
     },
     async (params) =>
       getClass(client, {
+        className: params.className,
+        edition: params.edition,
+      })
+  );
+
+  // Register reference tools - subclasses. Character-independent: works
+  // without any character on the roster having the subclass, and always
+  // returns the full level progression regardless of any character's level.
+  server.tool(
+    "search_subclasses",
+    "Search for subclasses by name and/or parent class (e.g. className: 'Paladin' lists every Paladin oath; name: 'Glory' finds Oath of Glory without knowing its class)",
+    {
+      name: z.string().optional().describe("Subclass name (partial match)"),
+      className: z.string().optional().describe("Parent class name to filter by (e.g., 'Paladin'). Omitting this searches every class and is slower on a cold cache."),
+      edition: editionParam,
+    },
+    async (params) =>
+      searchSubclasses(client, {
+        name: params.name,
+        className: params.className,
+        edition: params.edition,
+      })
+  );
+
+  server.tool(
+    "get_subclass",
+    "Get full details for a specific subclass — its own level-by-level features (e.g. all of a Paladin oath's features from level 3 through 20), independent of any character. Works even if no character on the roster has this subclass, and isn't capped by any character's current level. Useful for comparing how a subclass changed between the 2014 and 2024 rules.",
+    {
+      subclassName: z.string().describe("The subclass name (e.g. 'Oath of Glory')"),
+      className: z.string().optional().describe("Parent class name to disambiguate (e.g., 'Paladin'). Recommended for speed — omitting it searches every class."),
+      edition: editionParam,
+    },
+    async (params) =>
+      getSubclass(client, {
+        subclassName: params.subclassName,
         className: params.className,
         edition: params.edition,
       })

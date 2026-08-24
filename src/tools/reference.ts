@@ -1,5 +1,5 @@
 import { DdbClient } from "../api/client.js";
-import { SpellSearchParams, MonsterSearchParams, ItemSearchParams, FeatSearchParams, ClassSearchParams, RaceSearchParams, BackgroundSearchParams, ClassFeatureSearchParams, RacialTraitSearchParams, Edition } from "../types/reference.js";
+import { SpellSearchParams, MonsterSearchParams, ItemSearchParams, FeatSearchParams, ClassSearchParams, RaceSearchParams, BackgroundSearchParams, ClassFeatureSearchParams, RacialTraitSearchParams, SubclassSearchParams, Edition } from "../types/reference.js";
 import { DdbCharacter, DdbSpell } from "../types/character.js";
 import { ENDPOINTS } from "../api/endpoints.js";
 
@@ -1461,7 +1461,9 @@ interface DdbClass {
   isHomebrew: boolean;
   spellCastingAbilityId: number | null;
   primaryAbilities?: number[];
-  subclasses?: Array<{ id: number; name: string; description: string }>;
+  // No `subclasses` field exists on the real classes() payload — verified
+  // live; a class's subclasses are only reachable via a separate request
+  // (ENDPOINTS.gameData.subclasses(id), see loadSubclasses below).
   sources: Array<{ sourceId: number }>;
   classFeatures?: Array<{ id: number; name: string; description: string; requiredLevel: number }>;
 }
@@ -1580,6 +1582,293 @@ export async function getClass(
       lines.push(stripHtml(feature.description || ""));
       lines.push("");
     }
+  }
+
+  return {
+    content: [{ type: "text", text: lines.join("\n") }],
+  };
+}
+
+// --- Subclass types ---
+//
+// D&D Beyond has no "get subclass by name" endpoint independent of a class,
+// and no endpoint that returns every subclass at once — subclasses are only
+// reachable per parent base class via ENDPOINTS.gameData.subclasses(classId).
+// Each returned subclass record is shaped like a full DdbClass (it carries
+// its own hitDice, primaryAbilities, etc., mirroring the base class shape),
+// and critically its `classFeatures` array is the *merged* base-class +
+// subclass-only feature list — not the subclass's own features alone. See
+// subclassOnlyFeatures() below.
+
+interface DdbSubclassFeature {
+  id: number;
+  name: string;
+  description: string;
+  requiredLevel: number;
+}
+
+interface DdbSubclass {
+  id: number;
+  name: string;
+  description: string;
+  cardDescription?: string | null;
+  subclassTagline?: string | null;
+  subclassFlavorText?: string | null;
+  parentClassId: number;
+  spellCastingAbilityId?: number | null;
+  primaryAbilities?: number[];
+  hitDice?: number;
+  isHomebrew?: boolean;
+  sources?: Array<{ sourceId: number }>;
+  classFeatures?: DdbSubclassFeature[];
+}
+
+/**
+ * Loads the subclasses available under a given base class definition ID,
+ * independent of any character. Cached per class ID for 24h — the same TTL
+ * used for classes()/feats()/etc — so a cold `get_subclass` call with no
+ * `className` (which has to check every class) only pays the full N-request
+ * cost once a day; later lookups reuse the per-class cache entries.
+ */
+async function loadSubclasses(client: DdbClient, baseClassId: number): Promise<DdbSubclass[]> {
+  return client.get<DdbSubclass[]>(
+    ENDPOINTS.gameData.subclasses(baseClassId),
+    `subclasses:class:${baseClassId}`,
+    86_400_000,
+  );
+}
+
+/**
+ * Isolates a subclass's own features from the merged base+subclass list its
+ * `classFeatures` array actually carries, by excluding any feature whose ID
+ * also appears on the parent base class. ID-diffing (rather than trusting
+ * some section/tier flag) is deliberate: nothing in the payload reliably
+ * marks a feature as subclass-only, but IDs are stable and the base class's
+ * own feature list is already available from getClass/loadSubclasses' caller.
+ */
+function subclassOnlyFeatures(subclass: DdbSubclass, baseClass: DdbClass): DdbSubclassFeature[] {
+  const baseIds = new Set((baseClass.classFeatures ?? []).map((f) => f.id));
+  return (subclass.classFeatures ?? []).filter((f) => !baseIds.has(f.id));
+}
+
+/** A base class annotated with its computed isLegacy flag (see withLegacyFlag). */
+type AnnotatedClass = DdbClass & { isLegacy: boolean };
+
+/**
+ * Resolves candidate base classes for a subclass lookup: by name (respecting
+ * edition) when `className` is given, else every class matching the
+ * requested edition (or every class in both editions, if neither is given).
+ * Shared by getSubclass and searchSubclasses so both narrow the same way.
+ */
+function resolveCandidateClasses(
+  classes: AnnotatedClass[],
+  className: string | undefined,
+  edition: Edition | undefined,
+): AnnotatedClass[] | { error: string } {
+  if (!className) {
+    return edition ? classes.filter((c) => Boolean(c.isLegacy) === (edition === "2014")) : classes;
+  }
+
+  const searchClass = className.toLowerCase();
+  let byName = classes.filter((c) => c.name.toLowerCase() === searchClass);
+  if (byName.length === 0) byName = classes.filter((c) => c.name.toLowerCase().includes(searchClass));
+  if (byName.length === 0) {
+    return { error: `Class "${className}" not found.` };
+  }
+
+  if (!edition) return byName;
+  const editionMatched = byName.filter((c) => Boolean(c.isLegacy) === (edition === "2014"));
+  // Fall back to the unfiltered name match rather than erroring outright —
+  // e.g. a class that only exists pre-2024 shouldn't 0-result an edition:2024 query.
+  return editionMatched.length > 0 ? editionMatched : byName;
+}
+
+/** One subclass candidate paired with the base class it was found under. */
+interface SubclassMatch {
+  subclass: DdbSubclass;
+  baseClass: AnnotatedClass;
+}
+
+/**
+ * Searches every candidate base class's subclass list for a name match.
+ * Exact matches (across all candidate classes) win over partial matches.
+ * A class with no subclass content reachable for this account/edition (e.g.
+ * legacy content from an unowned sourcebook) is skipped rather than failing
+ * the whole search.
+ */
+async function findSubclassMatches(
+  client: DdbClient,
+  candidateClasses: AnnotatedClass[],
+  subclassSearchName: string,
+): Promise<SubclassMatch[]> {
+  const searchName = subclassSearchName.toLowerCase();
+  const perClass = await Promise.allSettled(
+    candidateClasses.map(async (baseClass) => ({
+      baseClass,
+      subclasses: await loadSubclasses(client, baseClass.id),
+    }))
+  );
+
+  const exact: SubclassMatch[] = [];
+  const partial: SubclassMatch[] = [];
+  for (const result of perClass) {
+    if (result.status !== "fulfilled") continue;
+    const { baseClass, subclasses } = result.value;
+    for (const subclass of subclasses ?? []) {
+      if (subclass.name.toLowerCase() === searchName) {
+        exact.push({ subclass, baseClass });
+      } else if (subclass.name.toLowerCase().includes(searchName)) {
+        partial.push({ subclass, baseClass });
+      }
+    }
+  }
+  return exact.length > 0 ? exact : partial;
+}
+
+/**
+ * Search for subclasses by name and/or parent class — the character-
+ * independent counterpart to searchClasses. Mirrors its conventions
+ * (edition collapsing, "(Legacy)"/"[2014]"/"[2024]" tagging).
+ */
+export async function searchSubclasses(
+  client: DdbClient,
+  params: SubclassSearchParams,
+): Promise<ToolResult> {
+  const classesRaw = await client.get<DdbClass[]>(ENDPOINTS.gameData.classes(), "game-data:classes", 86_400_000);
+  const config = await getGameConfigSafe(client);
+  const classes = withLegacyFlag(config, classesRaw ?? []) as AnnotatedClass[];
+
+  const candidates = resolveCandidateClasses(classes, params.className, params.edition);
+  if ("error" in candidates) {
+    return { content: [{ type: "text", text: candidates.error }] };
+  }
+
+  const searchName = (params.name ?? "").toLowerCase();
+  const perClass = await Promise.allSettled(
+    candidates.map(async (baseClass) => ({
+      baseClass,
+      subclasses: await loadSubclasses(client, baseClass.id),
+    }))
+  );
+
+  let matches: SubclassMatch[] = [];
+  for (const result of perClass) {
+    if (result.status !== "fulfilled") continue;
+    const { baseClass, subclasses } = result.value;
+    for (const subclass of subclasses ?? []) {
+      if (!searchName || subclass.name.toLowerCase().includes(searchName)) {
+        matches.push({ subclass, baseClass });
+      }
+    }
+  }
+
+  // Edition: collapse cross-edition duplicates (same class + subclass name)
+  // to the selected edition. Keyed on class+name, not just name, since two
+  // different classes can share a subclass name only in theory — kept safe
+  // either way.
+  if (params.edition) {
+    const byKey = new Map<string, SubclassMatch[]>();
+    for (const m of matches) {
+      const key = `${m.baseClass.name.toLowerCase()}|${m.subclass.name.toLowerCase()}`;
+      const arr = byKey.get(key);
+      if (arr) arr.push(m);
+      else byKey.set(key, [m]);
+    }
+    const wantLegacy = params.edition === "2014";
+    matches = Array.from(byKey.values()).map(
+      (group) => group.find((m) => Boolean(m.baseClass.isLegacy) === wantLegacy) ?? group[0]
+    );
+  }
+
+  matches.sort((a, b) => {
+    const classComp = a.baseClass.name.localeCompare(b.baseClass.name);
+    if (classComp !== 0) return classComp;
+    return a.subclass.name.localeCompare(b.subclass.name);
+  });
+
+  if (matches.length === 0) {
+    return { content: [{ type: "text", text: "No subclasses found matching the search criteria." }] };
+  }
+
+  const lines = [`# Subclass Search Results (${matches.length} found)\n`];
+  for (const { subclass, baseClass } of matches) {
+    const editionTag = editionSuffix(Boolean(baseClass.isLegacy), params.edition);
+    const flavor = subclass.cardDescription || stripHtml(subclass.description || "").substring(0, 100);
+    lines.push(`- **${subclass.name}**${editionTag} — ${baseClass.name}${flavor ? ` — ${flavor}` : ""}`);
+  }
+
+  return { content: [{ type: "text", text: lines.join("\n") }] };
+}
+
+/**
+ * Get full details for a specific subclass, including its own level-by-level
+ * features (isolated from the base class's), independent of any character —
+ * so a subclass no roster character has, or levels beyond any character's
+ * current level, are still reachable. Mirrors getClass's conventions.
+ */
+export async function getSubclass(
+  client: DdbClient,
+  params: { subclassName: string; className?: string; edition?: Edition },
+): Promise<ToolResult> {
+  const classesRaw = await client.get<DdbClass[]>(ENDPOINTS.gameData.classes(), "game-data:classes", 86_400_000);
+  const config = await getGameConfigSafe(client);
+  const classes = withLegacyFlag(config, classesRaw ?? []) as AnnotatedClass[];
+
+  const candidates = resolveCandidateClasses(classes, params.className, params.edition);
+  if ("error" in candidates) {
+    return { content: [{ type: "text", text: candidates.error }] };
+  }
+
+  let matches = await findSubclassMatches(client, candidates, params.subclassName);
+
+  if (matches.length === 0) {
+    const scope = params.className ? ` under "${params.className}"` : "";
+    return {
+      content: [{
+        type: "text",
+        text: `Subclass "${params.subclassName}"${scope} not found. It may not exist, or its sourcebook may not be owned/available on this D&D Beyond account.`,
+      }],
+    };
+  }
+
+  // Edition: pick the matching variant among same-name candidates.
+  if (params.edition) {
+    const wantLegacy = params.edition === "2014";
+    matches = [matches.find((m) => Boolean(m.baseClass.isLegacy) === wantLegacy) ?? matches[0]];
+  }
+
+  const { subclass, baseClass } = matches[0];
+
+  const lines: string[] = [];
+  const editionLabel = baseClass.isLegacy ? " *(2014)*" : " *(2024)*";
+  lines.push(`# ${subclass.name}${editionLabel}`);
+  lines.push(`*${baseClass.name} subclass*`);
+
+  const flavor = subclass.subclassTagline || subclass.cardDescription;
+  if (flavor) lines.push(`\n*${flavor}*`);
+
+  if (subclass.spellCastingAbilityId && subclass.spellCastingAbilityId !== baseClass.spellCastingAbilityId) {
+    lines.push(`\n**Spellcasting Ability:** ${STAT_NAMES[subclass.spellCastingAbilityId] ?? "Yes"}`);
+  }
+
+  const description = subclass.subclassFlavorText || subclass.description;
+  if (description) {
+    lines.push("");
+    lines.push(stripHtml(description));
+  }
+
+  const ownFeatures = subclassOnlyFeatures(subclass, baseClass)
+    .sort((a, b) => (a.requiredLevel ?? 0) - (b.requiredLevel ?? 0));
+
+  if (ownFeatures.length > 0) {
+    lines.push("\n## Features\n");
+    for (const feature of ownFeatures) {
+      lines.push(`### Level ${feature.requiredLevel ?? "?"}: ${feature.name}`);
+      lines.push(stripHtml(feature.description || ""));
+      lines.push("");
+    }
+  } else {
+    lines.push("\n*No subclass-specific features returned for this account/edition — the source may be unowned.*");
   }
 
   return {
@@ -1835,34 +2124,85 @@ export async function getBackground(
 
 // --- Class feature types ---
 
-interface DdbClassFeature {
-  id: number;
+/** One class-or-subclass feature flattened for search, tagged with where it
+ * comes from. `subclassName` is set only for subclass-only features. */
+interface ClassFeatureRow {
   name: string;
   description: string;
-  snippet: string;
   requiredLevel: number;
   classId: number;
-  className?: string;
-  isHomebrew: boolean;
-  sources: Array<{ sourceId: number }>;
+  className: string;
+  subclassName?: string;
+  isLegacy: boolean;
 }
 
 /**
- * Search for class features by name, class, or level.
+ * Builds the full corpus of class + subclass features across every base
+ * class, independent of any character. This replaces the old
+ * `class-feature/collection` endpoint, which does not exist on the live
+ * API — every request to it 404s regardless of query params (confirmed by
+ * live probing; see ENDPOINTS.gameData.classFeatureCollection and
+ * dndbeyond-mcp-class-feature-handoff.md). Base-class features come from
+ * classes(); subclass-only features come from subclasses() per base class,
+ * isolated via subclassOnlyFeatures(). Each underlying request is cached
+ * 24h, so repeat searches (and get_subclass/search_subclasses calls that
+ * touch the same classes) are cheap after the first cold call.
+ */
+async function loadAllClassFeatures(client: DdbClient): Promise<ClassFeatureRow[]> {
+  const classesRaw = await client.get<DdbClass[]>(ENDPOINTS.gameData.classes(), "game-data:classes", 86_400_000);
+  const config = await getGameConfigSafe(client);
+  const classes = withLegacyFlag(config, classesRaw ?? []) as AnnotatedClass[];
+
+  const rows: ClassFeatureRow[] = [];
+  for (const cls of classes) {
+    for (const f of cls.classFeatures ?? []) {
+      rows.push({
+        name: f.name,
+        description: f.description,
+        requiredLevel: f.requiredLevel,
+        classId: cls.id,
+        className: cls.name,
+        isLegacy: cls.isLegacy,
+      });
+    }
+  }
+
+  const subclassResults = await Promise.allSettled(
+    classes.map(async (cls) => ({ cls, subclasses: await loadSubclasses(client, cls.id) }))
+  );
+  for (const result of subclassResults) {
+    if (result.status !== "fulfilled") continue;
+    const { cls, subclasses } = result.value;
+    for (const sub of subclasses ?? []) {
+      for (const f of subclassOnlyFeatures(sub, cls)) {
+        rows.push({
+          name: f.name,
+          description: f.description,
+          requiredLevel: f.requiredLevel,
+          classId: cls.id,
+          className: `${cls.name} (${sub.name})`,
+          subclassName: sub.name,
+          isLegacy: cls.isLegacy,
+        });
+      }
+    }
+  }
+
+  return rows;
+}
+
+/**
+ * Search for class features by name, class, or level — covers both
+ * base-class and subclass features (e.g. `className: "Paladin"` matches
+ * base Paladin features and every Oath's features; `name: "Glory"` finds
+ * "Aura of Alacrity" etc. under Oath of Glory without needing to know it's
+ * a Paladin subclass first).
  */
 export async function searchClassFeatures(
   client: DdbClient,
   params: ClassFeatureSearchParams
 ): Promise<ToolResult> {
-  const cacheKey = "game-data:class-features";
-  const features = await client.get<DdbClassFeature[]>(
-    ENDPOINTS.gameData.classFeatureCollection(),
-    cacheKey,
-    86_400_000,
-  );
-
-  const config = await getGameConfigSafe(client);
-  let matched = withLegacyFlag(config, features ?? []);
+  let matched = await loadAllClassFeatures(client);
 
   if (params.name) {
     const searchName = params.name.toLowerCase();
@@ -1871,22 +2211,35 @@ export async function searchClassFeatures(
 
   if (params.className) {
     const searchClass = params.className.toLowerCase();
-    matched = matched.filter(
-      (f) => f.className?.toLowerCase().includes(searchClass)
-    );
+    matched = matched.filter((f) => f.className.toLowerCase().includes(searchClass));
   }
 
   if (params.level !== undefined) {
     matched = matched.filter((f) => f.requiredLevel === params.level);
   }
 
-  // Edition: collapse cross-edition duplicates (same class/level/name) to the
-  // selected edition.
-  matched = collapseByEdition(matched, params.edition);
+  // Edition: collapse cross-edition duplicates to the selected edition.
+  // Keyed on class+subclass+name — not just name — since e.g. "Channel
+  // Divinity" is a base feature on both Cleric and Paladin and must not
+  // collapse across classes.
+  if (params.edition) {
+    const byKey = new Map<string, ClassFeatureRow[]>();
+    for (const row of matched) {
+      const key = `${row.classId}|${row.subclassName ?? ""}|${row.name.toLowerCase()}`;
+      const arr = byKey.get(key);
+      if (arr) arr.push(row);
+      else byKey.set(key, [row]);
+    }
+    const wantLegacy = params.edition === "2014";
+    matched = Array.from(byKey.values()).map(
+      (group) => group.find((row) => row.isLegacy === wantLegacy) ?? group[0]
+    );
+  }
 
   matched.sort((a, b) => {
-    // Sort by class name, then by level, then by feature name
-    const classComp = (a.className || "").localeCompare(b.className || "");
+    // Sort by class name (subclass rows sort right after their base class,
+    // since "Paladin (Oath of Glory)" > "Paladin"), then by level, then name.
+    const classComp = a.className.localeCompare(b.className);
     if (classComp !== 0) return classComp;
     if (a.requiredLevel !== b.requiredLevel) return a.requiredLevel - b.requiredLevel;
     return a.name.localeCompare(b.name);
@@ -1903,12 +2256,11 @@ export async function searchClassFeatures(
 
   const lines = [`# Class Feature Search Results (${total > 30 ? `showing 30 of ${total}` : `${total} found`})\n`];
   for (const feature of matched) {
-    const className = feature.className || "Unknown";
     const level = feature.requiredLevel || "?";
     const editionTag = editionSuffix(feature.isLegacy, params.edition);
-    lines.push(`- **${feature.name}**${editionTag} — ${className} level ${level}`);
+    lines.push(`- **${feature.name}**${editionTag} — ${feature.className} level ${level}`);
 
-    const desc = stripHtml(feature.snippet || feature.description || "").substring(0, 100);
+    const desc = stripHtml(feature.description || "").substring(0, 100);
     if (desc) lines.push(`  ${desc}${desc.length >= 100 ? "..." : ""}`);
   }
 

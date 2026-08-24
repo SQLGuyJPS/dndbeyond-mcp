@@ -103,10 +103,11 @@ All `search_*` / `get_*` reference tools below accept an optional `edition` (`20
 - `search_items` / `get_item` — Magic item catalog
 - `search_feats` / `get_feat` — Feat discovery and full feat text
 - `get_condition` — Condition rules; accepts an optional `edition` (`2014`/`2024`, default `2014`)
-- `search_classes` / `get_class` — Class/subclass info; `get_class` includes the full level-by-level class feature list, useful for comparing e.g. the 2014 vs 2024 Ranger's Favored Enemy
+- `search_classes` / `get_class` — Base class info; `get_class` includes the full level-by-level base class feature list, useful for comparing e.g. the 2014 vs 2024 Ranger's Favored Enemy
+- `search_subclasses` / `get_subclass` — Subclass info, independent of any character: works even if nobody on your roster has the subclass, and always returns the full level-by-level progression regardless of any character's actual level. `className` narrows the search to one class and is recommended for speed (omitting it scans every class); `get_subclass` includes the subclass's own tenets/flavor text where D&D Beyond provides it
 - `search_races` / `get_race` — Race/species lookup by name; `get_race` includes full racial traits
 - `search_backgrounds` / `get_background` — Background lookup by name; `get_background` includes ability score choices, proficiencies, and the granted feature
-- `search_class_features` — Class feature lookup by name, class, or level
+- `search_class_features` — Class feature lookup by name, class, or level; covers both base-class and subclass features (e.g. `name: "Glory"` finds Oath of Glory's features without knowing they're on a Paladin subclass)
 - `search_racial_traits` — Racial trait lookup by name or race
 - `list_sources` — Source book IDs/names from D&D Beyond config
 

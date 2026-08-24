@@ -64,8 +64,29 @@ export const ENDPOINTS = {
       `${DDB_CHARACTER_SERVICE}/character/v5/game-data/always-known-spells?classId=${classId}&classLevel=${classLevel}&sharingSetting=3`,
     alwaysPreparedSpells: (classId: number, classLevel: number = 20) =>
       `${DDB_CHARACTER_SERVICE}/character/v5/game-data/always-prepared-spells?classId=${classId}&classLevel=${classLevel}&sharingSetting=3`,
+    // NOTE: there is no `class-feature/collection` endpoint on the live API —
+    // every variant of it 404s (confirmed by live probing 2026-08-24; see
+    // dndbeyond-mcp-class-feature-handoff.md). Base-class features live on
+    // `classes()` and subclass features live on `subclasses()` below;
+    // searchClassFeatures in src/tools/reference.ts builds its corpus from
+    // those two instead of this endpoint. Kept only as a documented dead end
+    // so nobody rediscovers and re-wires it.
     classFeatureCollection: () => `${DDB_CHARACTER_SERVICE}/character/v5/game-data/class-feature/collection`,
     racialTraitCollection: () => `${DDB_CHARACTER_SERVICE}/character/v5/game-data/racial-trait/collection`,
+    // Subclasses aren't included in classes() (each class record's `subclasses`
+    // field doesn't exist on the real payload — only `subclassDefinition`,
+    // which is null except on a character's own leveled class). This is the
+    // actual character-independent subclass list, keyed by the parent class's
+    // definition ID (from classes()/getClass — 2014 and 2024 Paladin are
+    // different IDs, so baseClassId already encodes edition). sharingSetting=3
+    // matches the broadest-coverage convention used by alwaysKnownSpells;
+    // verified live it returns the same set as sharingSetting=2 for both an
+    // owned 2024 class and a partially-owned 2014 class, so it's strictly
+    // not-worse. Each returned subclass's `classFeatures` is the *merged*
+    // base-class + subclass feature list, not the subclass's own features
+    // alone — see subclassOnlyFeatures() in src/tools/reference.ts.
+    subclasses: (baseClassId: number) =>
+      `${DDB_CHARACTER_SERVICE}/character/v5/game-data/subclasses?sharingSetting=3&baseClassId=${baseClassId}`,
   },
   monster: {
     search: (search: string = "", skip: number = 0, take: number = 20, showHomebrew?: boolean, sources?: string) => {
