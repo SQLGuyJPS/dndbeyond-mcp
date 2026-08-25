@@ -2,7 +2,7 @@
 
 A TypeScript MCP (Model Context Protocol) server for D&D Beyond. Gives Claude (and other MCP-compatible AI assistants) access to your D&D Beyond characters, campaigns, spells, monsters, items, and more.
 
-> **This is a fork** of [AlexWorland/dndbeyond-mcp](https://github.com/AlexWorland/dndbeyond-mcp). It adds **edition-aware reference lookups** (2014 vs 2024, resolved via D&D Beyond's `isLegacy` flag) for spells, conditions, and monsters, additional reference tools (races, backgrounds, class features, racial traits, source books), a resumable **compendium snapshot downloader**, **damage/condition resistances in monster stat blocks**, and makes **`check_auth` a real session-liveness probe**. It is the MCP backend for [dndtools](https://github.com/dmjohnston89/dndtools) and is **built from source** (not published to npm — see Installation). Released via annotated tags (current: **`v0.6.0`**); see [Fork changes](#fork-changes).
+> **This is a fork** of [AlexWorland/dndbeyond-mcp](https://github.com/AlexWorland/dndbeyond-mcp). It adds **edition-aware reference lookups** (2014 vs 2024) for spells, conditions, monsters, items, classes, species/races, backgrounds, feats, class features, and racial traits — resolved via D&D Beyond's `isLegacy` flag where present, or derived from the entity's source book otherwise — plus `get_class`, `get_race`, `get_background`, and `get_feat` detail lookups, additional reference tools (races, backgrounds, class features, racial traits, source books), a resumable **compendium snapshot downloader**, **damage/condition resistances in monster stat blocks**, and makes **`check_auth` a real session-liveness probe**. It is the MCP backend for [dndtools](https://github.com/dmjohnston89/dndtools) and is **built from source** (not published to npm — see Installation). Released via annotated tags (current: **`v0.6.0`**); see [Fork changes](#fork-changes).
 
 > **Disclaimer:** This project uses unofficial, reverse-engineered D&D Beyond endpoints. It is not affiliated with, endorsed by, or supported by D&D Beyond or Wizards of the Coast. Endpoints may change without notice.
 
@@ -10,7 +10,7 @@ A TypeScript MCP (Model Context Protocol) server for D&D Beyond. Gives Claude (a
 
 - **Character Management** — Read character sheets, update HP, spell slots, death saves, currency
 - **Campaign Access** — List campaigns, view party rosters
-- **Reference Lookups** — Search and retrieve spells, monsters, magic items, feats, conditions, classes, races, backgrounds, class features, and racial traits — **edition-aware** (2014/2024) for spells, conditions, and monsters
+- **Reference Lookups** — Search and retrieve spells, monsters, magic items, feats, conditions, classes, species/races, backgrounds, class features, and racial traits — **edition-aware** (2014/2024) across all of them, so you can compare rules between editions or pin a lookup to a specific ruleset
 - **Compendium Snapshots** — Download resumable, structured JSON snapshots of D&D Beyond reference data for offline/resilient access
 - **Workflow Prompts** — Session prep, encounter building, level-up guidance, spell recommendations
 - **Browser-Based Auth** — Playwright-powered login flow (no manual cookie extraction)
@@ -60,6 +60,8 @@ npm run compendium:download -- --output ./compendium
 npm run compendium:download -- --fresh
 ```
 
+**Snapshots only include content your account owns outright.** The downloader calls every reference endpoint without a `campaignId`, so it never pulls in content shared with you via a campaign (see `campaignId` under [Reference](#reference) below) and never enumerates your campaigns to discover what's shared. That's out of scope for this branch; auto-including campaign-shared content in a snapshot (e.g. by fanning out over `list_campaigns`) is a reasonable future enhancement but hasn't been explored yet.
+
 ## Claude Desktop Configuration
 
 Add this to your Claude Desktop configuration file, pointing at the built entrypoint (absolute path):
@@ -96,15 +98,22 @@ After adding the configuration, restart Claude Desktop.
 - `get_campaign_characters` — All characters in a campaign
 
 ### Reference
-- `search_spells` / `get_spell` — Spell lookup with filters; accepts an optional `edition` (`2014`/`2024`)
-- `search_monsters` / `get_monster` — Monster stat blocks; `edition`-aware (collapses cross-edition duplicate names, tags other-edition-only results)
+All `search_*` / `get_*` reference tools below accept an optional `edition` (`2014`/`2024`): on a search it collapses same-name 2014/2024 duplicates to the requested edition (tagging a row only when it had to fall back to the other edition), and with no `edition` given it lists every variant, tagging legacy ones `(Legacy)`; on a `get_*` it selects the matching variant. Classes, species/races, backgrounds, and feats resolve edition via D&D Beyond's native `isLegacy` flag where the API provides one (monsters, items, races, spells), or — for classes, backgrounds, feats, class features, and racial traits, whose payloads don't carry that flag — via the entity's primary source book (2014-ruleset sourcebooks vs. 2024-ruleset ones).
+
+Most of these tools (spells, items, feats, classes, subclasses, races, backgrounds, class features) also accept an optional `campaignId`: it unlocks content a campaign's DM shared with your account but that you don't own outright (e.g. a subclass from a sourcebook only the DM owns) — distinct from the account's normal owned-content view. Get valid IDs from `list_campaigns`. (`search_racial_traits` doesn't take it yet — see [Known issues](#known-issues).)
+
+**`campaignId` is opt-in, not automatic.** It's `undefined` by default on every call, so a lookup only sees campaign-shared content when `campaignId` is explicitly passed — there's no server-side fallback that retries an empty/not-found result against the account's campaigns. Whether an AI assistant driving these tools chooses to call `list_campaigns` and retry with `campaignId` after an initial miss is up to that assistant's own judgment in the moment, not something this server enforces or guarantees. See [Known issues](#known-issues) for the compendium downloader's related gap.
+
+- `search_spells` / `get_spell` — Spell lookup with filters
+- `search_monsters` / `get_monster` — Monster stat blocks
 - `search_items` / `get_item` — Magic item catalog
-- `search_feats` — Feat discovery
+- `search_feats` / `get_feat` — Feat discovery and full feat text
 - `get_condition` — Condition rules; accepts an optional `edition` (`2014`/`2024`, default `2014`)
-- `search_classes` — Class/subclass info
-- `search_races` — Race/species lookup by name
-- `search_backgrounds` — Background lookup by name
-- `search_class_features` — Class feature lookup by name, class, or level
+- `search_classes` / `get_class` — Base class info; `get_class` includes the full level-by-level base class feature list, useful for comparing e.g. the 2014 vs 2024 Ranger's Favored Enemy
+- `search_subclasses` / `get_subclass` — Subclass info, independent of any character: works even if nobody on your roster has the subclass, and always returns the full level-by-level progression regardless of any character's actual level. `className` narrows the search to one class and is recommended for speed (omitting it scans every class); `get_subclass` includes the subclass's own tenets/flavor text where D&D Beyond provides it
+- `search_races` / `get_race` — Race/species lookup by name; `get_race` includes full racial traits
+- `search_backgrounds` / `get_background` — Background lookup by name; `get_background` includes ability score choices, proficiencies, and the granted feature
+- `search_class_features` — Class feature lookup by name, class, or level; covers both base-class and subclass features (e.g. `name: "Glory"` finds Oath of Glory's features without knowing they're on a Paladin subclass)
 - `search_racial_traits` — Racial trait lookup by name or race
 - `list_sources` — Source book IDs/names from D&D Beyond config
 
@@ -144,6 +153,11 @@ Released as annotated tags (dndtools pins one by tag):
 - **`v0.4.1`** — Dependency audit fix (`npm audit fix`); dropped the unused `undici` dependency.
 - **`v0.5.0`** — Added `search_races`, `search_backgrounds`, `search_class_features`, `search_racial_traits`, and `list_sources` reference tools, and a resumable **compendium snapshot downloader** (`npm run compendium:download`) that exports spells/monsters/items/classes/feats/races/backgrounds/game-config as structured JSON.
 - **`v0.6.0`** — `get_monster` now includes **damage resistances/immunities/vulnerabilities and condition immunities** (previously fetched but discarded); fixed monster **saving-throw bonuses** rendering as `+null` for standard (non-overridden) proficiencies by computing them from the ability modifier and CR proficiency bonus.
+
+## Known issues
+
+- **`search_racial_traits` returns an error against the live API.** D&D Beyond's `racial-trait/collection` endpoint doesn't return the flat list the tool expects — its real envelope nests the trait list under `data.definitionData`, which comes back empty for every query-parameter combination tried so far. This is a pre-existing defect (not introduced by the edition-awareness or `campaignId` work) and is tracked for a follow-up fix.
+- **Compendium snapshots don't include campaign-shared content.** `npm run compendium:download` never passes `campaignId`, so a snapshot only ever contains content the account owns outright — not content shared via a campaign (see `campaignId` under [Reference](#reference)). This isn't a defect, just unexplored scope: fanning the downloader out over `list_campaigns` to include shared content is a reasonable future enhancement.
 
 ## Security
 

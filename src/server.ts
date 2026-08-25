@@ -53,10 +53,16 @@ import {
   getItem,
   listSources,
   searchFeats,
+  getFeat,
   getCondition,
   searchClasses,
+  getClass,
+  searchSubclasses,
+  getSubclass,
   searchRaces,
+  getRace,
   searchBackgrounds,
+  getBackground,
   searchClassFeatures,
   searchRacialTraits,
 } from "./tools/reference.js";
@@ -132,7 +138,7 @@ export async function startServer(): Promise<void> {
 
   server.tool(
     "get_definition",
-    "Look up a specific feat, spell, class feature, racial trait, or item by name (partial match). Returns the full description.",
+    "Look up a specific feat, spell, class feature, racial trait, or item by name (partial match) *as granted to one character* — requires characterId or characterName, and only finds things that character actually has. For a character-independent compendium lookup (works without any character existing), use get_spell, get_feat, get_item, get_background, get_race, get_class, or get_subclass instead.",
     {
       characterId: z.coerce.number().optional().describe("The character ID"),
       characterName: z
@@ -674,6 +680,23 @@ export async function startServer(): Promise<void> {
       })
   );
 
+  // A rules edition selector shared by every entity that can have both a 2014
+  // ("legacy") and 2024 ("current") variant.
+  const editionParam = z
+    .enum(["2014", "2024"])
+    .optional()
+    .describe("Rules edition to prefer: 2024 (current) or 2014 (legacy). Collapses cross-edition duplicates / selects the matching variant when both exist.");
+
+  // Unlocks content a campaign's DM shared with this account but the account
+  // doesn't own outright (e.g. a subclass from a sourcebook only the DM
+  // owns) — distinct from the account's normal owned-content view. Shared by
+  // every reference tool whose underlying endpoint supports it. Use
+  // list_campaigns to find valid IDs.
+  const campaignIdParam = z.coerce
+    .number()
+    .optional()
+    .describe("Campaign ID to also include content shared with that campaign but not owned by this account (e.g. a subclass from a sourcebook only the DM owns). Use list_campaigns to find IDs.");
+
   // Register reference tools - spells
   server.tool(
     "search_spells",
@@ -687,6 +710,7 @@ export async function startServer(): Promise<void> {
         .describe("School of magic (e.g., evocation, abjuration)"),
       concentration: z.boolean().optional().describe("Requires concentration"),
       ritual: z.boolean().optional().describe("Can be cast as ritual"),
+      campaignId: campaignIdParam,
     },
     async (params) =>
       searchSpells(client, {
@@ -695,6 +719,7 @@ export async function startServer(): Promise<void> {
         school: params.school,
         concentration: params.concentration,
         ritual: params.ritual,
+        campaignId: params.campaignId,
       })
   );
 
@@ -707,9 +732,10 @@ export async function startServer(): Promise<void> {
         .enum(["2014", "2024"])
         .optional()
         .describe("Rules edition to prefer: 2024 (current) or 2014 (legacy). Defaults to the first match."),
+      campaignId: campaignIdParam,
     },
     async (params) =>
-      getSpell(client, { spellName: params.spellName, edition: params.edition })
+      getSpell(client, { spellName: params.spellName, edition: params.edition, campaignId: params.campaignId })
   );
 
   // Register reference tools - monsters
@@ -786,6 +812,8 @@ export async function startServer(): Promise<void> {
         .describe("Item type (weapon, armor, potion, ring, etc.)"),
       source: z.string().optional().describe("Source book name (e.g., 'Dungeon Master\\'s Guide')"),
       page: z.coerce.number().optional().describe("Page number (default: 1, 30 results per page)"),
+      edition: editionParam,
+      campaignId: campaignIdParam,
     },
     async (params) =>
       searchItems(client, {
@@ -794,6 +822,8 @@ export async function startServer(): Promise<void> {
         type: params.type,
         source: params.source,
         page: params.page,
+        edition: params.edition,
+        campaignId: params.campaignId,
       })
   );
 
@@ -802,10 +832,14 @@ export async function startServer(): Promise<void> {
     "Get full details for a specific magic item by name",
     {
       itemName: z.string().describe("The item name"),
+      edition: editionParam,
+      campaignId: campaignIdParam,
     },
     async (params) =>
       getItem(client, {
         itemName: params.itemName,
+        edition: params.edition,
+        campaignId: params.campaignId,
       })
   );
 
@@ -822,10 +856,32 @@ export async function startServer(): Promise<void> {
     "Search for feats by name",
     {
       name: z.string().optional().describe("Feat name (partial match)"),
+      prerequisite: z.string().optional().describe("Prerequisite text to filter by (e.g., 'Strength 13')"),
+      edition: editionParam,
+      campaignId: campaignIdParam,
     },
     async (params) =>
       searchFeats(client, {
         name: params.name,
+        prerequisite: params.prerequisite,
+        edition: params.edition,
+        campaignId: params.campaignId,
+      })
+  );
+
+  server.tool(
+    "get_feat",
+    "Get full details for a specific feat by name",
+    {
+      featName: z.string().describe("The feat name"),
+      edition: editionParam,
+      campaignId: campaignIdParam,
+    },
+    async (params) =>
+      getFeat(client, {
+        featName: params.featName,
+        edition: params.edition,
+        campaignId: params.campaignId,
       })
   );
 
@@ -852,26 +908,105 @@ export async function startServer(): Promise<void> {
   // Register reference tools - classes
   server.tool(
     "search_classes",
-    "Search for character classes and subclasses",
+    "Search for base character classes by name (e.g. 'Paladin', 'Wizard'). For subclasses (e.g. 'Oath of Glory'), use search_subclasses or get_subclass instead.",
     {
       className: z.string().optional().describe("Class name (partial match)"),
+      edition: editionParam,
+      campaignId: campaignIdParam,
     },
     async (params) =>
       searchClasses(client, {
         className: params.className,
+        edition: params.edition,
+        campaignId: params.campaignId,
+      })
+  );
+
+  server.tool(
+    "get_class",
+    "Get full details for a specific class, including its level-by-level class features. Useful for comparing how a class changed between the 2014 and 2024 rules.",
+    {
+      className: z.string().describe("The class name"),
+      edition: editionParam,
+      campaignId: campaignIdParam,
+    },
+    async (params) =>
+      getClass(client, {
+        className: params.className,
+        edition: params.edition,
+        campaignId: params.campaignId,
+      })
+  );
+
+  // Register reference tools - subclasses. Character-independent: works
+  // without any character on the roster having the subclass, and always
+  // returns the full level progression regardless of any character's level.
+  server.tool(
+    "search_subclasses",
+    "Search for subclasses by name and/or parent class (e.g. className: 'Paladin' lists every Paladin oath; name: 'Glory' finds Oath of Glory without knowing its class). If a subclass isn't found and the account doesn't own its sourcebook, pass campaignId when it's shared via a campaign.",
+    {
+      name: z.string().optional().describe("Subclass name (partial match)"),
+      className: z.string().optional().describe("Parent class name to filter by (e.g., 'Paladin'). Omitting this searches every class and is slower on a cold cache."),
+      edition: editionParam,
+      campaignId: campaignIdParam,
+    },
+    async (params) =>
+      searchSubclasses(client, {
+        name: params.name,
+        className: params.className,
+        edition: params.edition,
+        campaignId: params.campaignId,
+      })
+  );
+
+  server.tool(
+    "get_subclass",
+    "Get full details for a specific subclass — its own level-by-level features (e.g. all of a Paladin oath's features from level 3 through 20), independent of any character. Works even if no character on the roster has this subclass, and isn't capped by any character's current level. Useful for comparing how a subclass changed between the 2014 and 2024 rules. If the subclass's sourcebook isn't owned by the account but was shared via a campaign, pass campaignId.",
+    {
+      subclassName: z.string().describe("The subclass name (e.g. 'Oath of Glory')"),
+      className: z.string().optional().describe("Parent class name to disambiguate (e.g., 'Paladin'). Recommended for speed — omitting it searches every class."),
+      edition: editionParam,
+      campaignId: campaignIdParam,
+    },
+    async (params) =>
+      getSubclass(client, {
+        subclassName: params.subclassName,
+        className: params.className,
+        edition: params.edition,
+        campaignId: params.campaignId,
       })
   );
 
   // Register reference tools - races
   server.tool(
     "search_races",
-    "Search for character races by name",
+    "Search for character races by name (called 'species' in the 2024 rules)",
     {
-      name: z.string().optional().describe("Race name (partial match)"),
+      name: z.string().optional().describe("Race/species name (partial match)"),
+      edition: editionParam,
+      campaignId: campaignIdParam,
     },
     async (params) =>
       searchRaces(client, {
         name: params.name,
+        edition: params.edition,
+        campaignId: params.campaignId,
+      })
+  );
+
+  server.tool(
+    "get_race",
+    "Get full details for a specific race/species by name, including its racial traits",
+    {
+      raceName: z.string().describe("The race/species name"),
+      edition: editionParam,
+      campaignId: campaignIdParam,
+    },
+    async (params) =>
+      getRace(client, {
+        raceName: params.raceName,
+        edition: params.edition,
+        campaignId: params.campaignId,
       })
   );
 
@@ -881,10 +1016,30 @@ export async function startServer(): Promise<void> {
     "Search for character backgrounds by name",
     {
       name: z.string().optional().describe("Background name (partial match)"),
+      edition: editionParam,
+      campaignId: campaignIdParam,
     },
     async (params) =>
       searchBackgrounds(client, {
         name: params.name,
+        edition: params.edition,
+        campaignId: params.campaignId,
+      })
+  );
+
+  server.tool(
+    "get_background",
+    "Get full details for a specific background by name, including ability score choices, proficiencies, and its granted feature",
+    {
+      backgroundName: z.string().describe("The background name"),
+      edition: editionParam,
+      campaignId: campaignIdParam,
+    },
+    async (params) =>
+      getBackground(client, {
+        backgroundName: params.backgroundName,
+        edition: params.edition,
+        campaignId: params.campaignId,
       })
   );
 
@@ -896,12 +1051,16 @@ export async function startServer(): Promise<void> {
       name: z.string().optional().describe("Feature name (partial match)"),
       className: z.string().optional().describe("Class name to filter by (e.g., 'Fighter', 'Wizard')"),
       level: z.coerce.number().optional().describe("Class level requirement"),
+      edition: editionParam,
+      campaignId: campaignIdParam,
     },
     async (params) =>
       searchClassFeatures(client, {
         name: params.name,
         className: params.className,
         level: params.level,
+        edition: params.edition,
+        campaignId: params.campaignId,
       })
   );
 
@@ -912,11 +1071,13 @@ export async function startServer(): Promise<void> {
     {
       name: z.string().optional().describe("Trait name (partial match)"),
       raceName: z.string().optional().describe("Race name to filter by (e.g., 'Elf', 'Dwarf')"),
+      edition: editionParam,
     },
     async (params) =>
       searchRacialTraits(client, {
         name: params.name,
         raceName: params.raceName,
+        edition: params.edition,
       })
   );
 
