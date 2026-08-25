@@ -98,6 +98,8 @@ After adding the configuration, restart Claude Desktop.
 ### Reference
 All `search_*` / `get_*` reference tools below accept an optional `edition` (`2014`/`2024`): on a search it collapses same-name 2014/2024 duplicates to the requested edition (tagging a row only when it had to fall back to the other edition), and with no `edition` given it lists every variant, tagging legacy ones `(Legacy)`; on a `get_*` it selects the matching variant. Classes, species/races, backgrounds, and feats resolve edition via D&D Beyond's native `isLegacy` flag where the API provides one (monsters, items, races, spells), or — for classes, backgrounds, feats, class features, and racial traits, whose payloads don't carry that flag — via the entity's primary source book (2014-ruleset sourcebooks vs. 2024-ruleset ones).
 
+Most of these tools (spells, items, feats, classes, subclasses, races, backgrounds, class features) also accept an optional `campaignId`: it unlocks content a campaign's DM shared with your account but that you don't own outright (e.g. a subclass from a sourcebook only the DM owns) — distinct from the account's normal owned-content view. Get valid IDs from `list_campaigns`. (`search_racial_traits` doesn't take it yet — see [Known issues](#known-issues).)
+
 - `search_spells` / `get_spell` — Spell lookup with filters
 - `search_monsters` / `get_monster` — Monster stat blocks
 - `search_items` / `get_item` — Magic item catalog
@@ -147,6 +149,10 @@ Released as annotated tags (dndtools pins one by tag):
 - **`v0.4.1`** — Dependency audit fix (`npm audit fix`); dropped the unused `undici` dependency.
 - **`v0.5.0`** — Added `search_races`, `search_backgrounds`, `search_class_features`, `search_racial_traits`, and `list_sources` reference tools, and a resumable **compendium snapshot downloader** (`npm run compendium:download`) that exports spells/monsters/items/classes/feats/races/backgrounds/game-config as structured JSON.
 - **`v0.6.0`** — `get_monster` now includes **damage resistances/immunities/vulnerabilities and condition immunities** (previously fetched but discarded); fixed monster **saving-throw bonuses** rendering as `+null` for standard (non-overridden) proficiencies by computing them from the ability modifier and CR proficiency bonus.
+
+## Known issues
+
+- **`search_racial_traits` returns an error against the live API.** D&D Beyond's `racial-trait/collection` endpoint doesn't return the flat list the tool expects — its real envelope nests the trait list under `data.definitionData`, which comes back empty for every query-parameter combination tried so far. This is a pre-existing defect (not introduced by the edition-awareness or `campaignId` work) and is tracked for a follow-up fix.
 
 ## Security
 

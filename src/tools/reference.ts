@@ -151,7 +151,7 @@ const SPELLCASTING_CLASS_IDS = [1, 2, 3, 4, 5, 6, 7, 8]; // Bard through Wizard
  * Queries both classLevel=1 (for cantrips/level 0 spells) and classLevel=20 (for levels 1-9).
  * Deduplicates by spell definition name.
  */
-async function loadSpellCompendium(client: DdbClient): Promise<DdbSpell[]> {
+async function loadSpellCompendium(client: DdbClient, campaignId?: number): Promise<DdbSpell[]> {
   const allSpells = new Map<string, DdbSpell>();
   let failureCount = 0;
   const totalRequests = SPELLCASTING_CLASS_IDS.length * 4; // 2 for known, 2 for prepared
@@ -160,8 +160,8 @@ async function loadSpellCompendium(client: DdbClient): Promise<DdbSpell[]> {
     // Fetch cantrips (level 0) by querying at classLevel=1
     try {
       const cantrips = await client.get<DdbSpell[]>(
-        ENDPOINTS.gameData.alwaysKnownSpells(classId, 1),
-        `spell-compendium:class:${classId}:cantrips`,
+        ENDPOINTS.gameData.alwaysKnownSpells(classId, 1, campaignId),
+        campaignCacheKey(`spell-compendium:class:${classId}:cantrips`, campaignId),
         86_400_000, // 24h
       );
 
@@ -178,8 +178,8 @@ async function loadSpellCompendium(client: DdbClient): Promise<DdbSpell[]> {
     // Fetch higher-level spells (levels 1-9) by querying at classLevel=20
     try {
       const spells = await client.get<DdbSpell[]>(
-        ENDPOINTS.gameData.alwaysKnownSpells(classId, 20),
-        `spell-compendium:class:${classId}`,
+        ENDPOINTS.gameData.alwaysKnownSpells(classId, 20, campaignId),
+        campaignCacheKey(`spell-compendium:class:${classId}`, campaignId),
         86_400_000, // 24h
       );
 
@@ -196,8 +196,8 @@ async function loadSpellCompendium(client: DdbClient): Promise<DdbSpell[]> {
     // Fetch always-prepared cantrips (level 0) by querying at classLevel=1
     try {
       const preparedCantrips = await client.get<DdbSpell[]>(
-        ENDPOINTS.gameData.alwaysPreparedSpells(classId, 1),
-        `spell-compendium:class:${classId}:prepared-cantrips`,
+        ENDPOINTS.gameData.alwaysPreparedSpells(classId, 1, campaignId),
+        campaignCacheKey(`spell-compendium:class:${classId}:prepared-cantrips`, campaignId),
         86_400_000, // 24h
       );
 
@@ -214,8 +214,8 @@ async function loadSpellCompendium(client: DdbClient): Promise<DdbSpell[]> {
     // Fetch always-prepared spells (levels 1-9) by querying at classLevel=20
     try {
       const preparedSpells = await client.get<DdbSpell[]>(
-        ENDPOINTS.gameData.alwaysPreparedSpells(classId, 20),
-        `spell-compendium:class:${classId}:prepared`,
+        ENDPOINTS.gameData.alwaysPreparedSpells(classId, 20, campaignId),
+        campaignCacheKey(`spell-compendium:class:${classId}:prepared`, campaignId),
         86_400_000, // 24h
       );
 
@@ -248,7 +248,7 @@ export async function searchSpells(
 ): Promise<ToolResult> {
   let allSpells: DdbSpell[];
   try {
-    allSpells = await loadSpellCompendium(client);
+    allSpells = await loadSpellCompendium(client, params.campaignId);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to load spell compendium";
     return { content: [{ type: "text", text: message }] };
@@ -333,13 +333,13 @@ export async function searchSpells(
  */
 export async function getSpell(
   client: DdbClient,
-  params: { spellName: string; edition?: "2014" | "2024" },
+  params: { spellName: string; edition?: "2014" | "2024"; campaignId?: number },
   _characterIds?: number[]
 ): Promise<ToolResult> {
   const searchName = params.spellName.toLowerCase();
   let allSpells: DdbSpell[];
   try {
-    allSpells = await loadSpellCompendium(client);
+    allSpells = await loadSpellCompendium(client, params.campaignId);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to load spell compendium";
     return { content: [{ type: "text", text: message }] };
@@ -560,6 +560,18 @@ function editionSuffix(isLegacy: boolean, edition?: Edition): string {
     return Boolean(isLegacy) !== (edition === "2014") ? (isLegacy ? " [2014]" : " [2024]") : "";
   }
   return isLegacy ? " *(Legacy)*" : "";
+}
+
+/**
+ * Appends a campaign suffix to a cache key when campaignId is set. Required
+ * whenever an endpoint's result depends on campaignId — content shared via
+ * one campaign differs from another campaign's or from the account's own
+ * unscoped view, so reusing a plain (non-campaign) cache key across calls
+ * with different campaignId values would serve stale/wrong cross-campaign
+ * data from cache.
+ */
+function campaignCacheKey(base: string, campaignId?: number): string {
+  return campaignId ? `${base}:campaign:${campaignId}` : base;
 }
 
 /**
@@ -896,9 +908,9 @@ export async function searchItems(
   client: DdbClient,
   params: ItemSearchParams
 ): Promise<ToolResult> {
-  const cacheKey = "game-data:items";
+  const cacheKey = campaignCacheKey("game-data:items", params.campaignId);
   const items = await client.get<DdbItem[]>(
-    ENDPOINTS.gameData.items(),
+    ENDPOINTS.gameData.items(params.campaignId),
     cacheKey,
     86_400_000,
   );
@@ -967,11 +979,11 @@ export async function searchItems(
  */
 export async function getItem(
   client: DdbClient,
-  params: { itemName: string; edition?: Edition }
+  params: { itemName: string; edition?: Edition; campaignId?: number }
 ): Promise<ToolResult> {
-  const cacheKey = "game-data:items";
+  const cacheKey = campaignCacheKey("game-data:items", params.campaignId);
   const items = await client.get<DdbItem[]>(
-    ENDPOINTS.gameData.items(),
+    ENDPOINTS.gameData.items(params.campaignId),
     cacheKey,
     86_400_000,
   );
@@ -1059,9 +1071,9 @@ export async function searchFeats(
   client: DdbClient,
   params: FeatSearchParams
 ): Promise<ToolResult> {
-  const cacheKey = "game-data:feats";
+  const cacheKey = campaignCacheKey("game-data:feats", params.campaignId);
   const feats = await client.get<DdbFeat[]>(
-    ENDPOINTS.gameData.feats(),
+    ENDPOINTS.gameData.feats(params.campaignId),
     cacheKey,
     86_400_000,
   );
@@ -1111,11 +1123,11 @@ export async function searchFeats(
  */
 export async function getFeat(
   client: DdbClient,
-  params: { featName: string; edition?: Edition }
+  params: { featName: string; edition?: Edition; campaignId?: number }
 ): Promise<ToolResult> {
-  const cacheKey = "game-data:feats";
+  const cacheKey = campaignCacheKey("game-data:feats", params.campaignId);
   const feats = await client.get<DdbFeat[]>(
-    ENDPOINTS.gameData.feats(),
+    ENDPOINTS.gameData.feats(params.campaignId),
     cacheKey,
     86_400_000,
   );
@@ -1475,9 +1487,9 @@ export async function searchClasses(
   client: DdbClient,
   params: ClassSearchParams
 ): Promise<ToolResult> {
-  const cacheKey = "game-data:classes";
+  const cacheKey = campaignCacheKey("game-data:classes", params.campaignId);
   const classes = await client.get<DdbClass[]>(
-    ENDPOINTS.gameData.classes(),
+    ENDPOINTS.gameData.classes(params.campaignId),
     cacheKey,
     86_400_000,
   );
@@ -1527,11 +1539,11 @@ export async function searchClasses(
  */
 export async function getClass(
   client: DdbClient,
-  params: { className: string; edition?: Edition }
+  params: { className: string; edition?: Edition; campaignId?: number }
 ): Promise<ToolResult> {
-  const cacheKey = "game-data:classes";
+  const cacheKey = campaignCacheKey("game-data:classes", params.campaignId);
   const classes = await client.get<DdbClass[]>(
-    ENDPOINTS.gameData.classes(),
+    ENDPOINTS.gameData.classes(params.campaignId),
     cacheKey,
     86_400_000,
   );
@@ -1630,10 +1642,10 @@ interface DdbSubclass {
  * `className` (which has to check every class) only pays the full N-request
  * cost once a day; later lookups reuse the per-class cache entries.
  */
-async function loadSubclasses(client: DdbClient, baseClassId: number): Promise<DdbSubclass[]> {
+async function loadSubclasses(client: DdbClient, baseClassId: number, campaignId?: number): Promise<DdbSubclass[]> {
   return client.get<DdbSubclass[]>(
-    ENDPOINTS.gameData.subclasses(baseClassId),
-    `subclasses:class:${baseClassId}`,
+    ENDPOINTS.gameData.subclasses(baseClassId, campaignId),
+    campaignCacheKey(`subclasses:class:${baseClassId}`, campaignId),
     86_400_000,
   );
 }
@@ -1700,12 +1712,13 @@ async function findSubclassMatches(
   client: DdbClient,
   candidateClasses: AnnotatedClass[],
   subclassSearchName: string,
+  campaignId?: number,
 ): Promise<SubclassMatch[]> {
   const searchName = subclassSearchName.toLowerCase();
   const perClass = await Promise.allSettled(
     candidateClasses.map(async (baseClass) => ({
       baseClass,
-      subclasses: await loadSubclasses(client, baseClass.id),
+      subclasses: await loadSubclasses(client, baseClass.id, campaignId),
     }))
   );
 
@@ -1734,7 +1747,11 @@ export async function searchSubclasses(
   client: DdbClient,
   params: SubclassSearchParams,
 ): Promise<ToolResult> {
-  const classesRaw = await client.get<DdbClass[]>(ENDPOINTS.gameData.classes(), "game-data:classes", 86_400_000);
+  const classesRaw = await client.get<DdbClass[]>(
+    ENDPOINTS.gameData.classes(params.campaignId),
+    campaignCacheKey("game-data:classes", params.campaignId),
+    86_400_000,
+  );
   const config = await getGameConfigSafe(client);
   const classes = withLegacyFlag(config, classesRaw ?? []) as AnnotatedClass[];
 
@@ -1747,7 +1764,7 @@ export async function searchSubclasses(
   const perClass = await Promise.allSettled(
     candidates.map(async (baseClass) => ({
       baseClass,
-      subclasses: await loadSubclasses(client, baseClass.id),
+      subclasses: await loadSubclasses(client, baseClass.id, params.campaignId),
     }))
   );
 
@@ -1808,9 +1825,13 @@ export async function searchSubclasses(
  */
 export async function getSubclass(
   client: DdbClient,
-  params: { subclassName: string; className?: string; edition?: Edition },
+  params: { subclassName: string; className?: string; edition?: Edition; campaignId?: number },
 ): Promise<ToolResult> {
-  const classesRaw = await client.get<DdbClass[]>(ENDPOINTS.gameData.classes(), "game-data:classes", 86_400_000);
+  const classesRaw = await client.get<DdbClass[]>(
+    ENDPOINTS.gameData.classes(params.campaignId),
+    campaignCacheKey("game-data:classes", params.campaignId),
+    86_400_000,
+  );
   const config = await getGameConfigSafe(client);
   const classes = withLegacyFlag(config, classesRaw ?? []) as AnnotatedClass[];
 
@@ -1819,7 +1840,7 @@ export async function getSubclass(
     return { content: [{ type: "text", text: candidates.error }] };
   }
 
-  let matches = await findSubclassMatches(client, candidates, params.subclassName);
+  let matches = await findSubclassMatches(client, candidates, params.subclassName, params.campaignId);
 
   if (matches.length === 0) {
     const scope = params.className ? ` under "${params.className}"` : "";
@@ -1911,9 +1932,9 @@ export async function searchRaces(
   client: DdbClient,
   params: RaceSearchParams
 ): Promise<ToolResult> {
-  const cacheKey = "game-data:races";
+  const cacheKey = campaignCacheKey("game-data:races", params.campaignId);
   const races = await client.get<DdbRace[]>(
-    ENDPOINTS.gameData.races(),
+    ENDPOINTS.gameData.races(params.campaignId),
     cacheKey,
     86_400_000,
   );
@@ -1954,11 +1975,11 @@ export async function searchRaces(
  */
 export async function getRace(
   client: DdbClient,
-  params: { raceName: string; edition?: Edition }
+  params: { raceName: string; edition?: Edition; campaignId?: number }
 ): Promise<ToolResult> {
-  const cacheKey = "game-data:races";
+  const cacheKey = campaignCacheKey("game-data:races", params.campaignId);
   const races = await client.get<DdbRace[]>(
-    ENDPOINTS.gameData.races(),
+    ENDPOINTS.gameData.races(params.campaignId),
     cacheKey,
     86_400_000,
   );
@@ -2026,9 +2047,9 @@ export async function searchBackgrounds(
   client: DdbClient,
   params: BackgroundSearchParams
 ): Promise<ToolResult> {
-  const cacheKey = "game-data:backgrounds";
+  const cacheKey = campaignCacheKey("game-data:backgrounds", params.campaignId);
   const backgrounds = await client.get<DdbBackground[]>(
-    ENDPOINTS.gameData.backgrounds(),
+    ENDPOINTS.gameData.backgrounds(params.campaignId),
     cacheKey,
     86_400_000,
   );
@@ -2072,11 +2093,11 @@ export async function searchBackgrounds(
  */
 export async function getBackground(
   client: DdbClient,
-  params: { backgroundName: string; edition?: Edition }
+  params: { backgroundName: string; edition?: Edition; campaignId?: number }
 ): Promise<ToolResult> {
-  const cacheKey = "game-data:backgrounds";
+  const cacheKey = campaignCacheKey("game-data:backgrounds", params.campaignId);
   const backgrounds = await client.get<DdbBackground[]>(
-    ENDPOINTS.gameData.backgrounds(),
+    ENDPOINTS.gameData.backgrounds(params.campaignId),
     cacheKey,
     86_400_000,
   );
@@ -2148,8 +2169,12 @@ interface ClassFeatureRow {
  * 24h, so repeat searches (and get_subclass/search_subclasses calls that
  * touch the same classes) are cheap after the first cold call.
  */
-async function loadAllClassFeatures(client: DdbClient): Promise<ClassFeatureRow[]> {
-  const classesRaw = await client.get<DdbClass[]>(ENDPOINTS.gameData.classes(), "game-data:classes", 86_400_000);
+async function loadAllClassFeatures(client: DdbClient, campaignId?: number): Promise<ClassFeatureRow[]> {
+  const classesRaw = await client.get<DdbClass[]>(
+    ENDPOINTS.gameData.classes(campaignId),
+    campaignCacheKey("game-data:classes", campaignId),
+    86_400_000,
+  );
   const config = await getGameConfigSafe(client);
   const classes = withLegacyFlag(config, classesRaw ?? []) as AnnotatedClass[];
 
@@ -2168,7 +2193,7 @@ async function loadAllClassFeatures(client: DdbClient): Promise<ClassFeatureRow[
   }
 
   const subclassResults = await Promise.allSettled(
-    classes.map(async (cls) => ({ cls, subclasses: await loadSubclasses(client, cls.id) }))
+    classes.map(async (cls) => ({ cls, subclasses: await loadSubclasses(client, cls.id, campaignId) }))
   );
   for (const result of subclassResults) {
     if (result.status !== "fulfilled") continue;
@@ -2202,7 +2227,7 @@ export async function searchClassFeatures(
   client: DdbClient,
   params: ClassFeatureSearchParams
 ): Promise<ToolResult> {
-  let matched = await loadAllClassFeatures(client);
+  let matched = await loadAllClassFeatures(client, params.campaignId);
 
   if (params.name) {
     const searchName = params.name.toLowerCase();

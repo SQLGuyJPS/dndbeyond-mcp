@@ -20,6 +20,8 @@ import {
   getBackground,
   getCondition,
 } from "../../src/tools/reference.js";
+import { ENDPOINTS } from "../../src/api/endpoints.js";
+import type { DdbCampaign } from "../../src/types/api.js";
 
 describe("Live: Spell endpoints", () => {
   it("should search spells by name", async () => {
@@ -243,6 +245,76 @@ describe("Live: Subclass endpoints", () => {
     const result = await getSubclass(client, { subclassName: "Definitely Not A Real Subclass Xyz", className: "Paladin" });
     expect(result.content[0].text.toLowerCase()).toContain("not found");
   });
+});
+
+describe("Live: campaignId support", () => {
+  // The follow-up to the subclass-feature-independence fix: sharingSetting
+  // only widens *owned*-content coverage, so a subclass whose sourcebook the
+  // account doesn't own (e.g. legacy Oath of Glory, gated behind Tasha's
+  // Cauldron of Everything) stays unreachable without campaignId even though
+  // a DM may have shared it via a campaign. This exercises campaignId
+  // end-to-end against the live API rather than re-deriving which specific
+  // campaign/subclass pairing (if any) is unlocked on this account, since
+  // that depends on what the test account's campaigns currently share.
+
+  it("accepts a real campaignId without error on every affected tool", async () => {
+    const client = await getLiveClient();
+    const campaigns = await client.get<DdbCampaign[]>(ENDPOINTS.campaign.list(), "live-campaigns-raw", 60_000);
+
+    if (!campaigns || campaigns.length === 0) {
+      return; // No campaigns on this account to scope to — nothing to test.
+    }
+    const campaignId = campaigns[0].id;
+
+    // None of these should throw, and each should still return well-formed
+    // results (possibly identical to the unscoped call, if this particular
+    // campaign shares nothing extra for that entity type).
+    const results = await Promise.all([
+      searchClasses(client, { campaignId }),
+      searchSubclasses(client, { className: "Paladin", campaignId }),
+      searchRaces(client, { name: "elf", campaignId }),
+      searchBackgrounds(client, { campaignId }),
+      searchFeats(client, { name: "alert", campaignId }),
+      searchItems(client, { name: "longsword", campaignId }),
+      searchClassFeatures(client, { name: "Glory", campaignId }),
+    ]);
+
+    for (const result of results) {
+      expect(result.content[0].text).toBeDefined();
+      expect(result.content[0].text.length).toBeGreaterThan(0);
+    }
+  }, 60_000);
+
+  it("a campaign-scoped subclass lookup either matches or exceeds the unscoped one", async () => {
+    const client = await getLiveClient();
+    const campaigns = await client.get<DdbCampaign[]>(ENDPOINTS.campaign.list(), "live-campaigns-raw", 60_000);
+
+    if (!campaigns || campaigns.length === 0) {
+      return;
+    }
+
+    // Look across every campaign for one that unlocks the legacy Oath of
+    // Glory (unreachable without campaignId per the original handoff doc's
+    // investigation, unless this account now owns Tasha's Cauldron of
+    // Everything outright). Best-effort: if none of the account's current
+    // campaigns share it, that's a valid outcome too — just skip the assertion
+    // rather than failing on account-state this test doesn't control.
+    const unscoped = await getSubclass(client, { subclassName: "Oath of Glory", className: "Paladin", edition: "2014" });
+    if (!unscoped.content[0].text.toLowerCase().includes("not found")) {
+      return; // Already owned outright — campaignId isn't the deciding factor here.
+    }
+
+    for (const campaign of campaigns) {
+      const scoped = await getSubclass(client, { subclassName: "Oath of Glory", className: "Paladin", edition: "2014", campaignId: campaign.id });
+      if (!scoped.content[0].text.toLowerCase().includes("not found")) {
+        expect(scoped.content[0].text).toContain("# Oath of Glory");
+        return; // Found a campaign that unlocks it — regression confirmed.
+      }
+    }
+    // No campaign on this account currently shares it — not a failure, just
+    // means this account's campaign-sharing state has changed since the
+    // original investigation.
+  }, 60_000);
 });
 
 describe("Live: Race endpoints", () => {
