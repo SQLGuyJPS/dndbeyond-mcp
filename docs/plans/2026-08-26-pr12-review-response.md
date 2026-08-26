@@ -611,6 +611,35 @@ reply as known and tracked. **Effort if done: 3/10.**
 - `campaign:${campaignId}:characters` cache-key collision between `src/tools/campaign.ts:82` and
   `src/resources/campaign.ts:106` — already flagged in `AUDIT.md:38-55`.
 
+### D7. Edition preference is a per-tool hardcoded constant, not a user preference — **split: D7a IN SCOPE, D7b DISCUSSION ONLY**
+
+Making spells and conditions edition-aware (D1/D2) exposed a question the single-maintainer codebase never had
+to answer before: **"no `edition` passed" resolves to a different hardcoded default per tool** — `"2024"`
+everywhere except `get_condition`'s deliberate `"2014"` (D2b). That was tolerable as one person's implicit
+preference; it stops being tolerable the moment every compendium entity is edition-aware and more than one
+person's preference exists. Full analysis, options, and a recommendation are in
+[`docs/design/2026-08-26-edition-preference-design.md`](../design/2026-08-26-edition-preference-design.md).
+
+**Not proposing to solve this in `#12`.** It's a cross-cutting design decision (global default vs. per-entity
+override vs. a durable per-user preference mechanism), not a bug in this PR's diff, and it's precisely the kind
+of question where dmjohnston89's own `get_condition` default shows reasonable people land differently. Deciding
+it unilaterally inside a PR under review would be the same overreach D2b already avoids for the condition
+default specifically — this generalizes that same caution to every entity at once.
+
+**D7a — paving-the-way constant extraction. IN SCOPE, folds into D1's implementation.**
+When D1 lands `params.edition ?? "2024"` at its two/three call sites (`reference.ts:291-299`/`:314-320`,
+`getSpell`'s pick), use a single named `const DEFAULT_EDITION: Edition = "2024";` instead of repeating the string
+literal. Zero behavior change today — it exists solely so a future config-driven default has one interception
+point instead of a grep-and-replace. **Effort: 1/10.**
+
+**D7b — the actual preference mechanism (global default, per-entity override, durable per-user config). DISCUSSION ONLY, not built here.**
+Raise it in the reply with the design doc linked; propose the `preferences.edition` shape (reusing the same
+`config.json` file B3's deferred `defaultCampaignId` would use, not a second mechanism) as a strawman, and let
+dmjohnston89 weigh in before any of it is built, in this PR or a follow-up. **Effort: 0/10 here** — no code, a
+paragraph in the reply plus the linked doc.
+
+**Files:** `docs/design/2026-08-26-edition-preference-design.md` (new); D7a touches whatever D1 already touches.
+
 ---
 
 ## Implementation order
@@ -626,7 +655,8 @@ Ordered so correctness lands before polish, and so shared helpers exist before t
    correct "unknown" handling. **Blocked on the user running `npm run test:live` locally.**
 6. **D1** — `search_spells` gains `edition`; spells move onto `collapseByEdition`/`pickByEdition`/`editionSuffix`.
    Do this **after** B2 so the tri-state is already in `editionSuffix`, and after A1 so the collapse/pick helpers
-   have settled.
+   have settled. Fold in **D7a** here — introduce the `DEFAULT_EDITION` constant instead of a repeated `"2024"`
+   literal at each new call site.
 7. **D4** — edition labels on `getItem`/`getMonster`/`getSpell`, honouring B2's tri-state. Folds naturally into
    D1's `getSpell` change — do them together.
 8. **D2a** — edition label on `get_condition` output. Independent of everything else; 1 line plus a test.
@@ -635,8 +665,9 @@ Ordered so correctness lands before polish, and so shared helpers exist before t
 11. **C3** — scrub and date-stamp the handoff doc.
 12. **C2** — version bump to v0.7.0 across `package.json` and README (last, so the changelog entry is accurate).
     Update README `:13`'s "across all of them" claim to match what D1/D2a actually deliver.
-13. **B3 / C4 / D2b** — reply to the reviewer; open the `campaignId` follow-up issue; propose the
-    `get_condition` default flip and **wait for his answer** before touching it. No code.
+13. **B3 / C4 / D2b / D7b** — reply to the reviewer; open the `campaignId` follow-up issue; propose the
+    `get_condition` default flip and the edition-preference design doc, and **wait for his answer** on both
+    before touching either. No code.
 
 Steps 1-4 and 6-12 need no live auth and can be completed in one pass. Step 5 pauses for the live run; step 13's
 D2b half pauses for the reviewer.
@@ -734,10 +765,24 @@ Live tests are correctly excluded from `npm test` (separate `vitest.live.config.
       your v0.2.0 design decision and dndtools pins by tag, so flipping it is a breaking change that's yours to
       make, not mine to slip into a PR you're reviewing. One-line change if you want it
       (`server.ts:899` + `reference.ts:1424`) plus a breaking-change note in the v0.7.0 entry — say the word.
-11. **Two more pre-existing items folded in** because they're adjacent: `search_monsters` now uses the shared
+11. **Fixing D1/D2 surfaced a bigger question, which I'm deliberately not answering inside this PR:** once
+    every entity is edition-aware, "no `edition` passed" resolves to a *different hardcoded default per tool* —
+    2024 everywhere except your `get_condition` 2014 default. That was fine as one person's implicit preference;
+    it stops being fine the moment more than one person's preference exists — I want 2024 across the board, you
+    clearly wanted a mix, and other users of the fork may want yet another split. I wrote up the options (global
+    config default, per-entity override map, a conversational preference-setter tool, forcing a choice at
+    setup-time, build-time per-edition snapshots) with effort/fit/ease-of-use ratings and a recommendation in
+    [`docs/design/2026-08-26-edition-preference-design.md`](../design/2026-08-26-edition-preference-design.md).
+    **Not proposing to build any of it here** — it's a cross-cutting design decision, not a bug in this diff, and
+    it's exactly the kind of call your `get_condition` default shows we can land on differently. The one thing
+    I *did* fold into this PR is a one-line paving change: D1's new `"2024"` fallback is now a named
+    `DEFAULT_EDITION` constant instead of a repeated literal, purely so a future config-driven default has one
+    place to intercept. Happy to build the real mechanism as a follow-up if you want it, and happy to defer
+    indefinitely if you'd rather each fork just hardcode its own preference.
+12. **Two more pre-existing items folded in** because they're adjacent: `search_monsters` now uses the shared
     `editionSuffix` (it previously omitted the `*(Legacy)*` branch, so same-name monsters were indistinguishable —
     a deliberate output change, not a regression), and `getItem`/`getMonster`/`getSpell` now label the edition
     they returned.
-12. **Identified but deliberately left alone:** the module-level `cachedConfig` staleness after an account switch
+13. **Identified but deliberately left alone:** the module-level `cachedConfig` staleness after an account switch
     (already at `BACKLOG.md:41`) and `searchRacialTraits`'s non-campaign cache key. Happy to take either in a
     follow-up.
