@@ -106,6 +106,21 @@ of what the probe finds.
    fallback is defensive and stays. If absent, the fallback is now load-bearing and the README's items claim is
    already accurate.
 
+**Live result (2026-08-29, user's account):** `isLegacy` **is present** on the raw items payload — the
+`sources`-derived fallback is defensive, not load-bearing, for items specifically. No code change needed; the
+belt-and-braces derivation stays as insurance for accounts/response shapes where it might not be.
+
+Running the live suite also caught a bad assumption in this plan's own step 6 test additions: the two new
+`search_feats`/`get_feat` "both editions of Chef" tests assumed Chef's legacy printing is free/owned content like
+Fighter (class) or Bag of Holding (item) — it isn't; this test account doesn't own that sourcebook, so only the
+2024 Chef exists in `feats()`. Confirmed via a throwaway raw-payload dump, not a derivation bug: the single Chef
+entry has no native `isLegacy` (as expected — feats never carry one) and resolves correctly through
+`isLegacyBySource`. Rewritten to assert the actual invariant (a recognized source resolves to a definite
+edition, never `[edition unknown]`/`*(edition undetermined)*`) unconditionally, with the stronger both-editions
+assertion gated on it actually being true for the running account — mirroring the account-state-defensive
+pattern already used elsewhere in this file (e.g. the `campaignId` subclass test). All 34 live reference tests
+pass as of this run.
+
 **Files:** `src/tools/reference.ts`, `tests/live/read-reference.test.ts`, `tests/tools/reference-editions.test.ts`
 
 ---

@@ -9,6 +9,7 @@ import {
   searchRaces,
   getRace,
   searchItems,
+  getItem,
   isLegacyBySource,
 } from "../../src/tools/reference.js";
 import { DdbClient } from "../../src/api/client.js";
@@ -46,16 +47,25 @@ describe("isLegacyBySource", () => {
   it("returns false for a source in a 2024 (5.5e) category", () => {
     expect(isLegacyBySource(MOCK_CONFIG, [{ sourceId: 145 }])).toBe(false);
   });
-  it("returns false for a source outside both edition category sets", () => {
+  it("returns false for a *recognized* source outside both edition category sets", () => {
+    // sourceId 999 is in MOCK_CONFIG.sources (category 2, e.g. Critical Role) —
+    // known, just not edition-tied, so this is a confident false, not "unknown".
     expect(isLegacyBySource(MOCK_CONFIG, [{ sourceId: 999 }])).toBe(false);
   });
-  it("returns false when sources is empty/undefined", () => {
-    expect(isLegacyBySource(MOCK_CONFIG, [])).toBe(false);
-    expect(isLegacyBySource(MOCK_CONFIG, undefined)).toBe(false);
+  // Tri-state (B2): undefined means "genuinely couldn't determine this", and
+  // must stay distinct from a confident false — a caller that coerces the
+  // result with Boolean() collapses "unknown" back into "2024", which is the
+  // exact bug this tri-state exists to prevent.
+  it("returns undefined when the entity itself has no source (nothing to look up)", () => {
+    expect(isLegacyBySource(MOCK_CONFIG, [])).toBeUndefined();
+    expect(isLegacyBySource(MOCK_CONFIG, undefined)).toBeUndefined();
   });
-  it("returns false when the config or its sources are unavailable", () => {
-    expect(isLegacyBySource(undefined, [{ sourceId: 1 }])).toBe(false);
-    expect(isLegacyBySource({ ...MOCK_CONFIG, sources: undefined }, [{ sourceId: 1 }])).toBe(false);
+  it("returns undefined when the config or its sources are unavailable", () => {
+    expect(isLegacyBySource(undefined, [{ sourceId: 1 }])).toBeUndefined();
+    expect(isLegacyBySource({ ...MOCK_CONFIG, sources: undefined }, [{ sourceId: 1 }])).toBeUndefined();
+  });
+  it("returns undefined when the entity's sourceId isn't among config's known sources", () => {
+    expect(isLegacyBySource(MOCK_CONFIG, [{ sourceId: 424242 }])).toBeUndefined();
   });
 });
 
@@ -234,5 +244,22 @@ describe("searchItems edition", () => {
     const client = { get: vi.fn().mockResolvedValue([bagLegacy, bagCurrent]), getRaw: vi.fn() } as unknown as DdbClient;
     const result = await searchItems(client, { name: "bag of holding", edition: "2024" });
     expect(result.content[0].text.match(/Bag of Holding/g)).toHaveLength(1);
+  });
+
+  // A1: it's unconfirmed whether the live items payload reliably carries
+  // `isLegacy` — belt-and-braces, items without it still collapse correctly
+  // via the sources[]-derived fallback (isLegacyBySource), same as classes/
+  // backgrounds/feats.
+  it("collapses items with no native isLegacy field, deriving edition from sources[]", async () => {
+    const swordLegacy = { id: 1, name: "Sun Blade", type: "Weapon", filterType: "Weapon", rarity: "Rare", requiresAttunement: true, isHomebrew: false, sources: [{ sourceId: 1 }], canAttune: true, magic: true };
+    const swordCurrent = { id: 2, name: "Sun Blade", type: "Weapon", filterType: "Weapon", rarity: "Rare", requiresAttunement: true, isHomebrew: false, sources: [{ sourceId: 145 }], canAttune: true, magic: true };
+    const client = mockClient([swordLegacy, swordCurrent]);
+
+    const legacyResult = await searchItems(client, { name: "sun blade", edition: "2014" });
+    expect(legacyResult.content[0].text.match(/Sun Blade/g)).toHaveLength(1);
+    expect(legacyResult.content[0].text).not.toContain("edition unknown");
+
+    const item = await getItem(client, { itemName: "Sun Blade", edition: "2014" });
+    expect(item.content[0].text).toContain("*(2014)*");
   });
 });
