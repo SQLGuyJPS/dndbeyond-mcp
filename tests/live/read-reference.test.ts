@@ -389,6 +389,41 @@ describe("Live: campaignId support", () => {
     // means this account's campaign-sharing state has changed since the
     // original investigation.
   }, 60_000);
+
+  it("a campaign-scoped feat lookup either matches or exceeds the unscoped one", async () => {
+    const client = await getLiveClient();
+    const campaigns = await client.get<DdbCampaign[]>(ENDPOINTS.campaign.list(), "live-campaigns-raw", 60_000);
+
+    if (!campaigns || campaigns.length === 0) {
+      return;
+    }
+
+    // Mirrors the Oath of Glory test above, for the entity that actually
+    // surfaced this gap (see the "should resolve Chef's edition" test in the
+    // feat block above). Feats don't behave like subclasses here: get_feat's
+    // edition pick falls back to whichever printing exists instead of
+    // reporting "not found", so a present-but-wrong-edition *(2024)* tag is
+    // the unscoped-ownership signal, not absence. Best-effort: if this
+    // account owns legacy Chef outright, or none of its campaigns currently
+    // share it, that's a valid outcome too — this only asserts the positive
+    // case when the account state actually supports it.
+    const unscoped = await getFeat(client, { featName: "Chef", edition: "2014" });
+    if (unscoped.content[0].text.includes("*(2014)*")) {
+      return; // Already owned outright — campaignId isn't the deciding factor here.
+    }
+
+    for (const campaign of campaigns) {
+      const scoped = await getFeat(client, { featName: "Chef", edition: "2014", campaignId: campaign.id });
+      if (scoped.content[0].text.includes("*(2014)*")) {
+        expect(scoped.content[0].text).toContain("# Chef");
+        return; // Found a campaign that unlocks it — regression confirmed.
+      }
+    }
+    // No campaign on this account currently shares it — not a failure, just
+    // means this account's campaign-sharing state has changed since this was
+    // confirmed live (2026-08-30) via a campaign sharing Tasha's Cauldron of
+    // Everything.
+  }, 60_000);
 });
 
 describe("Live: Race endpoints", () => {

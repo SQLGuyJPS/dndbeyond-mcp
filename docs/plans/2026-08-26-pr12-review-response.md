@@ -121,6 +121,23 @@ assertion gated on it actually being true for the running account — mirroring 
 pattern already used elsewhere in this file (e.g. the `campaignId` subclass test). All 34 live reference tests
 pass as of this run.
 
+**Follow-up (2026-08-30):** the sourcebook gap above turned out to be `campaignId`-shaped — the user has a
+campaign sharing Tasha's Cauldron of Everything, which the original manual test hadn't accounted for. Hardcoding
+that campaign's ID into the "both editions" test was rejected: it's true for exactly one account, isn't stable
+even for that account (sharing can be revoked), and commits more exposure than C3 already scrubbed for no
+portability benefit. An env-var-gated variant was also rejected — nobody would know to set it, making it
+equivalent to no assertion at all.
+
+Instead, extended an existing pattern rather than inventing a new one: `describe("Live: campaignId support")`
+already discovers the account's own campaigns live (`client.get<DdbCampaign[]>(ENDPOINTS.campaign.list(), ...)`)
+and loops over them to find one that unlocks otherwise-unreachable content — for subclasses (the Oath of Glory
+test from A2/A3). Feats, the entity that surfaced this whole gap, had no equivalent. Added "a campaign-scoped
+feat lookup either matches or exceeds the unscoped one," mirroring the same loop. One wrinkle: `get_feat`'s
+edition pick falls back to whichever printing exists rather than reporting "not found," so the unscoped-ownership
+check here is "does `*(2014)*` appear," not absence of a not-found message. No campaign ID, name, or other
+identifier appears in the test — it's discovered at runtime, so it stays meaningful (skip, not fail) for any
+runner without a matching campaign. All 35 live reference tests pass.
+
 **Files:** `src/tools/reference.ts`, `tests/live/read-reference.test.ts`, `tests/tools/reference-editions.test.ts`
 
 ---
