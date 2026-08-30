@@ -60,6 +60,8 @@ npm run compendium:download -- --output ./compendium
 npm run compendium:download -- --fresh
 ```
 
+**Snapshots only include content your account owns outright due to copyright/IP concerns.** The downloader calls every reference endpoint without a `campaignId`, so it never pulls in content shared with you via a campaign (see `campaignId` under [Reference](#reference) below) and never enumerates your campaigns to discover what's shared. A snapshot persists to disk after the session ends, so including campaign-shared content would risk leaving a user holding an offline copy of someone else's paid sourcebook content after that campaign's access or sharing is revoked. Live tool calls don't have this problem, since nothing persists beyond the existing TTL cache — see `campaignId` under [Reference](#reference) for those.
+
 ## Claude Desktop Configuration
 
 Add this to your Claude Desktop configuration file, pointing at the built entrypoint (absolute path):
@@ -99,6 +101,8 @@ After adding the configuration, restart Claude Desktop.
 All `search_*` / `get_*` reference tools below accept an optional `edition` (`2014`/`2024`): on a search it collapses same-name 2014/2024 duplicates to the requested edition (tagging a row only when it had to fall back to the other edition), and with no `edition` given it lists every variant, tagging legacy ones `(Legacy)`; on a `get_*` it selects the matching variant. Classes, species/races, backgrounds, and feats resolve edition via D&D Beyond's native `isLegacy` flag where the API provides one (monsters, items, races, spells), or — for classes, backgrounds, feats, class features, and racial traits, whose payloads don't carry that flag — via the entity's primary source book (2014-ruleset sourcebooks vs. 2024-ruleset ones).
 
 Most of these tools (spells, items, feats, classes, subclasses, races, backgrounds, class features) also accept an optional `campaignId`: it unlocks content a campaign's DM shared with your account but that you don't own outright (e.g. a subclass from a sourcebook only the DM owns) — distinct from the account's normal owned-content view. Get valid IDs from `list_campaigns`. (`search_racial_traits` doesn't take it yet — see [Known issues](#known-issues).)
+
+**`campaignId` is opt-in, not automatic.** It's `undefined` by default on every call, so a lookup only sees campaign-shared content when `campaignId` is explicitly passed — there's no server-side fallback that retries an empty/not-found result against the account's campaigns. Whether an AI assistant driving these tools chooses to call `list_campaigns` and retry with `campaignId` after an initial miss is up to that assistant's own judgment in the moment, not something this server enforces or guarantees. See [Known issues](#known-issues) for the compendium downloader's related gap.
 
 - `search_spells` / `get_spell` — Spell lookup with filters
 - `search_monsters` / `get_monster` — Monster stat blocks
@@ -153,6 +157,7 @@ Released as annotated tags (dndtools pins one by tag):
 ## Known issues
 
 - **`search_racial_traits` returns an error against the live API.** D&D Beyond's `racial-trait/collection` endpoint doesn't return the flat list the tool expects — its real envelope nests the trait list under `data.definitionData`, which comes back empty for every query-parameter combination tried so far. This is a pre-existing defect (not introduced by the edition-awareness or `campaignId` work) and is tracked for a follow-up fix.
+- **Compendium snapshots don't include campaign-shared content, by design.** `npm run compendium:download` never passes `campaignId`, so a snapshot only ever contains content the account owns outright — not content shared via a campaign (see `campaignId` under [Reference](#reference)). This isn't a gap to close: a snapshot persists to disk, so pulling in campaign-shared content would risk leaving someone holding an offline copy of paid sourcebook content after their access to that campaign is revoked. Not planned, on copyright/IP grounds.
 
 ## Security
 
