@@ -141,6 +141,24 @@ describe("getSubclass", () => {
     expect(legacy.content[0].text).toContain("Sacred Weapon (Legacy)");
   });
 
+  // Confirmed HIGH-severity defect via the 2026-09-01 edition-awareness test
+  // suite: with no edition requested, getSubclass used to keep whichever
+  // candidate findSubclassMatches happened to find first — order-dependent
+  // on the fan-out over CLASSES_2014-then-2024 below — rather than defaulting
+  // to DEFAULT_EDITION (2024) like every other get_* detail tool.
+  it("defaults to the 2024 variant when no edition is given", async () => {
+    const client = mockClient({
+      classes: [...CLASSES_2014, ...CLASSES_2024],
+      subclassesByParent: { 4: [OATH_OF_DEVOTION_2014], 2190881: [OATH_OF_DEVOTION_2024] },
+    });
+
+    const result = await getSubclass(client, { subclassName: "Oath of Devotion" });
+    const text = result.content[0].text;
+    expect(text).toContain("*(2024)*");
+    expect(text).toContain("Sacred Weapon");
+    expect(text).not.toContain("Sacred Weapon (Legacy)");
+  });
+
   it("reports not-found instead of erroring when a subclass isn't reachable for this account/edition", async () => {
     const result = await getSubclass(mockClient(), { subclassName: "Oath of the Crown", className: "Paladin" });
     expect(result.content[0].text).toContain("not found");

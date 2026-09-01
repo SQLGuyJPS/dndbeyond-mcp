@@ -113,7 +113,7 @@ without trusting the agent's self-report.
 
 ## 3. Test groups
 
-28 tests, 13 groups. Every expectation below was captured from the live server, not from memory or the web.
+30 tests, 13 groups. Every expectation below was captured from the live server, not from memory or the web.
 
 ### G1 — Subclasses (A2, subclass independence)
 
@@ -209,8 +209,13 @@ without trusting the agent's self-report.
 ### G9 — Conditions (D2a, D2b — the breaking change)
 
 - **G9a** *(default-behavior, D2b)* — "A player just got grappled at my table — what exactly can they still
-  do?" **The prompt must not mention an edition**; the whole point is what the server does when the caller
-  names none.
+  do? Use only the D&D Beyond tools, and don't look up more than one edition — just tell me what the tools
+  give you by default." **The prompt must not mention an edition, and must instruct the subject not to
+  disambiguate by fetching both**; the whole point is what the server does when the caller names none. A
+  capable model faced with an edition-ambiguous question will otherwise just query both editions and report
+  both — reasonable behavior, but it never exercises the no-edition code path. (Found in the 2026-09-01 full
+  run: the first fix of this prompt still lacked this clause and the resulting test came back INVALID for
+  exactly this reason, on top of the pilot's original edition-leak catch.)
   Expect the **2024** text by default: Speed 0 and can't increase, **Disadvantage on attacks against anyone
   but the grappler**, drag/carry at 1 extra foot per foot, ends on **Incapacitated** or moved out of reach.
   Fail: the 2014 text — meaning D2b's flip did not land.
@@ -237,6 +242,10 @@ without trusting the agent's self-report.
 
 ### G11 — Racial traits (C4, known-broken endpoint)
 
+> **Status: fixed 2026-09-01.** `search_racial_traits` no longer fails — see §6/§7. Both sub-tests below
+> describe the defect as it stood when run; C4 confirmed it was systemic (every race, every edition argument),
+> not Dragonborn-specific, which shaped the fix.
+
 - **G11a** — what traits does a Dragonborn get?
   `search_racial_traits` fails against the live API (pre-existing, documented under Known issues). Expect the
   model to route around it via `get_race` and still answer correctly.
@@ -245,10 +254,14 @@ without trusting the agent's self-report.
 
 ### G12 — Default-edition consistency
 
-`pickByEdition(candidates, undefined)` returns `candidates[0]` (`src/tools/reference.ts:499-506`) — raw API
-order, not `DEFAULT_EDITION`. So `search_*` and `get_condition` default to 2024 while the compendium `get_*`
-tools default to whatever the API listed first. Spot checks during planning found `get_item("Bag of Holding")`,
-`get_spell("Cure Wounds")` and `get_feat("Chef")` all returning **2014** with no edition passed.
+> **Status: fixed 2026-09-01.** `pickByEdition` now defaults internally to `DEFAULT_EDITION` when no edition is
+> given, instead of `candidates[0]` — see §6/§7 below. The description in this section is the defect as it stood
+> when the suite was designed and run; it is kept for context on what G12a/G12b/G9c were built to catch.
+
+`pickByEdition(candidates, undefined)` returned `candidates[0]` — raw API order, not `DEFAULT_EDITION`. So
+`search_*` and `get_condition` defaulted to 2024 while the compendium `get_*` tools defaulted to whatever the
+API listed first. Spot checks during planning found `get_item("Bag of Holding")`, `get_spell("Cure Wounds")` and
+`get_feat("Chef")` all returning **2014** with no edition passed.
 
 - **G12a** — with no edition named: the weight of a Bag of Holding, the school of Cure Wounds, and the
   Grappled condition.
@@ -268,10 +281,12 @@ Fighter subclass search to a campaign that shares extra sourcebooks returns **Ps
 scoping surfaces a legacy-source printing that then wins the candidate ordering. Since this PR threaded
 `campaignId` through 15 tools, that interaction is now reachable from everywhere.
 
-**Recommended change:** pass `params.edition ?? DEFAULT_EDITION` into `pickByEdition` from the
-compendium `get_*` handlers instead of relying on `candidates[0]`. That makes every tool's no-edition default
-2024 uniformly, finishes what D2b started for conditions, and makes the README's "pin a lookup to a specific
-ruleset" claim true across the board. `DEFAULT_EDITION` (D7a) already exists as the interception point.
+**Change applied (2026-09-01):** `pickByEdition` itself now falls back to `DEFAULT_EDITION` (not
+`candidates[0]`) when no edition is given, and `getSubclass`'s equivalent inline selection logic was fixed the
+same way. Fixing the shared helper rather than patching each `get_*` call site closes the door on a future
+handler forgetting the `?? DEFAULT_EDITION` guard. That makes every tool's no-edition default 2024 uniformly,
+finishes what D2b started for conditions, and makes the README's "pin a lookup to a specific ruleset" claim true
+across the board. See §7 for the full change list and test coverage.
 
 ### G13 — Failure honesty (A3)
 
@@ -311,3 +326,132 @@ not that the server is correct.
 
 Findings are consolidated at the end of the results file, each mapped to a file and line with a recommended
 change, ranked by severity.
+
+---
+
+## 6. Results (scrubbed summary)
+
+Full per-test transcripts (prompts, tool-call logs, verbatim responses) live in a private working file, not
+this repo — it captured this account's real campaign IDs and entitlements, which must not be committed. This
+section is the scrubbed record: every finding, every grade, no account-identifying detail.
+
+**Pilot (2026-08-31), prompt-level web denial:** 4 tests — G1b, G7a, G12a PASS; G9a INVALID (prompt named an
+edition, so it tested explicit retrieval rather than the default — a rubric-calibration catch, not a server
+defect). Fixed the G9a prompt and reclassified which tests actually exercise a no-edition default (only G8c,
+G9a, G9c, G10a, G12a, G12b do — see §1's callout above).
+
+**Full run (2026-09-01), structural web denial active** (`ddb-tester` confirmed as a session-start agent type,
+not just a prompt-level restriction): all remaining tests dispatched to isolated, cold-context subagents.
+
+| ID | Grade | ID | Grade | ID | Grade |
+|---|---|---|---|---|---|
+| G1a | PASS | G6a | PASS | G10c | PASS |
+| G1b | PASS | G6b | PASS (minor flag) | G11a | PASS |
+| G1c | PASS | G7a | PASS | G11b | PASS |
+| G2a | PASS | G7b | PASS | G12a | PASS |
+| G2b | PASS | G8a | PASS | G12b | PASS |
+| G3a | PASS | G8b | PASS | G13a | PASS |
+| G3b | PASS | G8c | PASS | G13b | PASS |
+| G4a | PASS | G9a | INVALID → fixed → PASS | | |
+| G4b | PASS | G9b | PASS | | |
+| G5a | PASS | G9c | PASS | | |
+| G5b | PASS | G10a | PASS | | |
+| | | G10b | PASS | | |
+
+**30/30 tests hold a valid grade: 29 PASS, 1 INVALID-then-fixed. Zero web calls, zero memory-substitution
+violations detected across the full run.** Every subject that hit a gap (tool error, entitlement boundary, an
+oversized `list_sources` response, content the MCP doesn't expose) reported the gap instead of papering over it.
+Two admitted memory intrusions (a subject describing remembered rules purely to contrast against a tool result,
+and another recalling a stat-block detail from training data) were both correctly suppressed rather than acted
+on — see the rubric note below.
+
+### G9a needed two prompt fixes before it validly tested anything
+
+First pilot run: the prompt said "I'm running a 2024 game," so the subject passed `edition: "2024"` explicitly —
+it tested explicit retrieval, not the default. Fixed by dropping the edition cue. Second attempt still came back
+INVALID for a different reason: facing an edition-ambiguous question with no cue either way, a capable model
+proactively called `get_condition` for **both** 2014 and 2024 and reported both — reasonable behavior, but it
+still never exercises the no-edition code path. The prompt now explicitly says "don't look up more than one
+edition — just tell me what the tools give you by default," matching the phrasing G8c/G9c/G12a already used.
+Re-run with that clause: a single `get_condition` call, no edition argument, returned `*(2024)*`, and the
+subject confirmed it deliberately skipped 2014 per instruction. **PASS.**
+
+### Findings (ranked; status reflects fixes applied this session — see §7)
+
+1. **~~HIGH~~ FIXED — no default edition on compendium `get_*` handlers.** `pickByEdition(candidates,
+   undefined)` returned `candidates[0]` — raw API order — rather than `DEFAULT_EDITION`. Directly confirmed by
+   G12a (Bag of Holding, Cure Wounds, and Grappled disagreeing on edition in one no-edition answer) and G9c/G11a
+   (extended the defect to `get_class` and `get_race`, tool families not spot-checked when the plan was
+   written). Indirectly confirmed by G1b (a subclass reported as 2024 unscoped and 2014 when campaign-scoped —
+   see finding 2). Six independent confirmations across two entities and five tool families by the end of the
+   full run. See §7 for the fix.
+2. **~~MEDIUM~~ RESOLVED AS A SIDE EFFECT — `campaignId` can change an entity's reported edition.** Reconfirmed
+   independently five more times after the pilot (G1c, G12b, G13a, and the original G1b/G12 spot check), on
+   `get_subclass` and `search_subclasses` both. Same root cause as finding 1: campaign scoping surfaces a
+   legacy-source printing that then wins the candidate-ordering fallback. Fixing finding 1 removes that
+   fallback, so this resolves without a separate change — verified: a campaign-scoped lookup with no edition
+   argument now also defaults to `DEFAULT_EDITION` rather than whichever printing the campaign happened to
+   surface first.
+3. **~~LOW, raised to MEDIUM~~ FIXED — `list_sources` (~53k characters) unusable in-conversation.** Hit by four
+   separate subjects across the suite (G1b, G6a, G12b, G13a), all of whom gave up on reading it and inferred
+   entitlements from result-set diffing instead — consistently avoided, not occasionally. Added an optional
+   `nameFilter` parameter (matches both D&D Beyond's short source code and its full title) so a caller checking
+   ownership of one or two books doesn't pay the full-list cost. The full unfiltered list is unchanged and still
+   large by design — no pagination was added, since a single-book lookup was the actual pattern observed.
+4. **~~LOW~~ FIXED — `search_racial_traits` failed on every race and every edition argument tried.** G4b and
+   G11b both hit `items.map is not a function` regardless of which race or edition was requested, confirming C4
+   was systemic rather than Dragonborn-specific. Root cause: the endpoint it called
+   (`racial-trait/collection`) returns `{ data: { definitionData: [], accessTypes: {} } }` — an object, not an
+   array — live, every time, for every account; its response message ("Optional racial traits successfully
+   received") suggests it was never the right endpoint for a general trait catalog. Fixed by building the trait
+   list from each race's own `racialTraits[]` (already used by `get_race`/`search_races`) instead — the same
+   fix pattern already used for `class-feature/collection`'s equivalent 404 elsewhere in this codebase.
+5. **LOW — no tool reaches the 2024 grapple-escape rule.** It lives in the Unarmed Strike / Grapple action
+   rules, not the condition entry, and no tool surfaces it. A subject correctly refused to supply it from memory
+   and told the DM to check the rulebook — honest degradation, not a defect. Left open; worth a README coverage
+   note rather than a code change.
+6. **Not a defect — honest-fallback behavior confirmed working, twice more.** `get_race("Dwarf", "2014")` and
+   `get_monster("Goblin", "2024")` both returned the only edition that actually exists on this account, labeled
+   with the edition actually returned rather than the one requested. Both subjects caught the mismatch
+   themselves and said so unprompted — the intended behavior for G4b/G10c and confirmation that D4's labels are
+   legible enough for a model to reason about, not just present.
+
+### Rubric note
+
+One subject (testing feat-entitlement boundaries) described the *real* 2014 mechanics of a feat from memory,
+purely to contrast against what the tools returned, hedging it explicitly as background knowledge rather than a
+tool claim. The hedge was honest and nothing ungrounded was presented as fact, but the cleaner behavior is to
+omit the remembered contrast entirely rather than surface it at all, even caveated. Worth tightening
+`ddb-tester`'s system prompt along the lines of: "if you note what the tools didn't return, don't describe it —
+just say it wasn't returned." Not implemented this session; noted for a future prompt revision.
+
+---
+
+## 7. Fixes applied (2026-09-01)
+
+All three fixable findings above were implemented, tested (unit + live verification against the real D&D Beyond
+API), and merged into this branch the same session the full run completed:
+
+- **Default-edition defect (finding 1).** `pickByEdition` in `src/tools/reference.ts` now resolves
+  `edition ?? DEFAULT_EDITION` internally instead of falling back to `candidates[0]`; `getSubclass`'s equivalent
+  inline duplicate-selection logic (it didn't route through `pickByEdition`) was fixed the same way. Fixing the
+  shared helper rather than every call site means a future `get_*` handler can't reintroduce this by forgetting
+  a guard. Regression tests added for `getClass`, `getBackground`, `getFeat`, `getItem`, `getSpell`,
+  `getMonster`, `getRace`, and `getSubclass`, each with fixtures ordered so the legacy variant would win if the
+  old `candidates[0]` behavior ever came back. `campaignId`'s edition-reordering side effect (finding 2) is
+  covered by the same fix — no separate change needed.
+- **`search_racial_traits` crash (finding 4).** Rebuilt to source trait data from each race's own
+  `racialTraits[]` (via `races()`) instead of the non-functional `racial-trait/collection` endpoint. Also
+  threaded `campaignId` through, matching every other reference tool. Cross-edition collapsing is keyed on race
+  name + trait name (not trait name alone), so e.g. "Darkvision" on Dwarf and on Elf never merge into one row —
+  the same keying discipline `search_class_features` already uses for cross-class name collisions. 8 new unit
+  tests; live-verified against the real API (previously an unconditional crash on every race/edition; now
+  returns real trait data).
+- **`list_sources` size (finding 3).** Added an optional `nameFilter` parameter, matched against both the
+  source's short code and its full title (the same matching `resolveSourceId` uses internally for the `source`
+  filter on `search_items`/`search_monsters` — which had the identical "only matches the short code" limitation,
+  fixed alongside this). Live-verified: an unfiltered call is still ~53k characters; a filtered call for one
+  book's title returns a single-entry result.
+
+All three changes build clean (`npm run build`) and pass the full test suite (382 tests, including the new
+regression coverage above) with no regressions.

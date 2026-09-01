@@ -16,8 +16,16 @@ describe("pickByEdition", () => {
   it("falls back to the only variant present when no edition match", () => {
     expect(pickByEdition([legacy], "2024")).toBe(legacy);
   });
-  it("returns the first candidate when edition is omitted", () => {
-    expect(pickByEdition([legacy, modern], undefined)).toBe(legacy);
+  it("defaults to the current (2024/non-legacy) variant when edition is omitted", () => {
+    // Was `.toBe(legacy)` — pickByEdition used to fall back to raw candidate
+    // order (candidates[0]) when no edition was given, which meant every
+    // get_* detail tool's no-edition behavior silently depended on whatever
+    // order the API happened to return same-name variants in. Fixed to
+    // default to DEFAULT_EDITION (2024), matching search_*/get_condition.
+    expect(pickByEdition([legacy, modern], undefined)).toBe(modern);
+  });
+  it("falls back to the only variant present even when it doesn't match DEFAULT_EDITION", () => {
+    expect(pickByEdition([legacy], undefined)).toBe(legacy);
   });
 });
 
@@ -363,6 +371,31 @@ describe("getMonster edition", () => {
 
     const legacy = await getMonster(mc, { monsterName: "Goblin", edition: "2014" });
     expect(legacy.content[0].text).toContain("*(2014)*");
+  });
+
+  // Confirmed HIGH-severity defect via the 2026-09-01 edition-awareness test
+  // suite: with no edition requested, getMonster used to return whichever
+  // candidate the search endpoint listed first (legacy id 11, per the fixture
+  // order above) rather than defaulting to DEFAULT_EDITION (2024).
+  it("defaults to the 2024 variant when no edition is given", async () => {
+    const search = {
+      accessType: {},
+      pagination: { take: 10, skip: 0, currentPage: 1, pages: 1, total: 2 },
+      data: [
+        monsterVariant({ id: 11, name: "Goblin", isLegacy: true }),
+        monsterVariant({ id: 22, name: "Goblin", isLegacy: false }),
+      ],
+    };
+    const getRaw = vi.fn(async (url: string) => {
+      if (url.includes("config")) return MOCK_CONFIG;
+      if (url.includes("22")) return { data: monsterVariant({ id: 22, name: "Goblin", isLegacy: false }) };
+      if (url.includes("11")) return { data: monsterVariant({ id: 11, name: "Goblin", isLegacy: true }) };
+      return search;
+    });
+    const mc = { get: vi.fn(), getRaw } as unknown as DdbClient;
+
+    const result = await getMonster(mc, { monsterName: "Goblin" });
+    expect(result.content[0].text).toContain("*(2024)*");
   });
 });
 

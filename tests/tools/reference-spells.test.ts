@@ -284,4 +284,14 @@ describe("getSpell edition selection", () => {
     expect(result.content[0].text).toContain("Legacy cure restores 1d8");
     expect(result.content[0].text).not.toContain("Modern cure");
   });
+
+  // Confirmed HIGH-severity defect via the 2026-09-01 edition-awareness test
+  // suite: with no edition requested, getSpell used to return whichever
+  // candidate came first in the compendium (cw2014, per the mock's array
+  // order above) rather than defaulting to DEFAULT_EDITION (2024).
+  it("defaults to the 2024 variant when no edition is given", async () => {
+    const result = await getSpell(mc, { spellName: "Cure Wounds" });
+    expect(result.content[0].text).toContain("Modern cure restores 2d8");
+    expect(result.content[0].text).not.toContain("Legacy cure");
+  });
 });

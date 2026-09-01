@@ -17,7 +17,7 @@ interface GameConfig {
   alignments: Array<{ id: number; name: string }>;
   damageTypes: Array<{ id: number; name: string }>;
   senses: Array<{ id: number; name: string }>;
-  sources?: Array<{ id: number; name: string; sourceCategoryId?: number }>;
+  sources?: Array<{ id: number; name: string; description?: string; sourceCategoryId?: number }>;
   damageAdjustments: Array<{ id: number; name: string; type: number }>;
 }
 
@@ -82,7 +82,16 @@ async function getGameConfigSafe(client: DdbClient): Promise<GameConfig | undefi
 function resolveSourceId(config: GameConfig, source?: string): number | undefined {
   if (!source) return undefined;
   const q = source.toLowerCase().trim();
-  const fromConfig = config.sources?.find((s) => s.name.toLowerCase().includes(q) || q.includes(s.name.toLowerCase()));
+  // Match against both the short code D&D Beyond's config uses for `name`
+  // (e.g. "PHB", "TCoE") and its full-title `description` (e.g. "Tasha's
+  // Cauldron of Everything") — a caller passing the book's real title, not
+  // its internal abbreviation, would otherwise never match anything here.
+  const fromConfig = config.sources?.find(
+    (s) =>
+      s.name.toLowerCase().includes(q) ||
+      q.includes(s.name.toLowerCase()) ||
+      s.description?.toLowerCase().includes(q)
+  );
   if (fromConfig) return fromConfig.id;
   return SOURCE_MAP[q];
 }
@@ -493,15 +502,25 @@ export type EditionRanked = {
 
 /**
  * Pick the variant matching the requested edition (2024 = non-legacy, 2014 =
- * legacy); fall back to the first candidate when no edition is given or none match.
- * Mirrors getSpell's variant selection.
+ * legacy); fall back to the first candidate when none match. Mirrors getSpell's
+ * variant selection.
+ *
+ * When no edition is given, falls back to DEFAULT_EDITION rather than
+ * `candidates[0]` — every one of this function's callers is a singular get_*
+ * detail lookup (getSpell, getMonster, getItem, getFeat, getClass, getRace,
+ * getBackground) that must return exactly one entity, so an unrequested
+ * edition used to resolve to whatever order the API happened to return
+ * candidates in — frequently the 2014 variant — rather than the same 2024
+ * default every other edition-aware tool (search_*, get_condition) already
+ * uses. Confirmed via the 2026-09-01 edition-awareness test suite (see
+ * docs/plans/2026-08-31-edition-awareness-test-plan.md) as a HIGH-severity,
+ * cross-tool-inconsistent defect.
  */
 export function pickByEdition<T extends EditionRanked>(
   candidates: T[],
   edition?: Edition,
 ): T {
-  if (!edition) return candidates[0];
-  const wantLegacy = edition === "2014";
+  const wantLegacy = (edition ?? DEFAULT_EDITION) === "2014";
   return candidates.find((c) => Boolean(c.isLegacy) === wantLegacy) ?? candidates[0];
 }
 
@@ -1126,10 +1145,28 @@ export async function getItem(
   };
 }
 
-/** List the account's source books (id + name) as JSON, for client-side pickers. */
-export async function listSources(client: DdbClient): Promise<ToolResult> {
+/**
+ * List the account's source books (id + name) as JSON, for client-side pickers.
+ *
+ * `nameFilter` narrows the list to sources whose name contains the given text
+ * (case-insensitive) — without it, the full list runs to ~53k characters on a
+ * typical account (LOW finding from the 2026-09-01 edition-awareness test
+ * suite: callers that only needed to check ownership of one or two books were
+ * paying that full cost every time).
+ */
+export async function listSources(client: DdbClient, nameFilter?: string): Promise<ToolResult> {
   const config = await getGameConfig(client);
-  return { content: [{ type: "text", text: JSON.stringify(config.sources ?? []) }] };
+  let sources = config.sources ?? [];
+  if (nameFilter) {
+    const q = nameFilter.toLowerCase();
+    // Check both `name` (D&D Beyond's short code, e.g. "TCoE") and
+    // `description` (the full title, e.g. "Tasha's Cauldron of Everything") —
+    // see resolveSourceId's identical reasoning.
+    sources = sources.filter(
+      (s) => s.name.toLowerCase().includes(q) || s.description?.toLowerCase().includes(q)
+    );
+  }
+  return { content: [{ type: "text", text: JSON.stringify(sources) }] };
 }
 
 // --- Feat types ---
@@ -2044,9 +2081,13 @@ export async function getSubclass(
     };
   }
 
-  // Edition: pick the matching variant among same-name candidates.
-  if (params.edition) {
-    const wantLegacy = params.edition === "2014";
+  // Edition: pick the matching variant among same-name candidates. Always
+  // runs (not just when params.edition is set) so a no-edition call defaults
+  // to DEFAULT_EDITION instead of whichever candidate findSubclassMatches
+  // happened to return first — mirrors pickByEdition's fix for the same
+  // defect in every other get_* detail handler.
+  {
+    const wantLegacy = (params.edition ?? DEFAULT_EDITION) === "2014";
     matches = [matches.find((m) => Boolean(m.baseClass.isLegacy) === wantLegacy) ?? matches[0]];
   }
 
@@ -2116,7 +2157,7 @@ interface DdbRace {
   size: string;
   sources: Array<{ sourceId: number }>;
   racialTraits?: Array<{
-    definition: { name: string; description: string; hideOnDetailsPage?: boolean };
+    definition: { id?: number; name: string; description: string; snippet?: string; hideOnDetailsPage?: boolean };
   }>;
 }
 
@@ -2586,6 +2627,57 @@ interface DdbRacialTrait {
   raceName?: string;
   isHomebrew: boolean;
   sources: Array<{ sourceId: number }>;
+  /** Inherited directly from the owning race's native isLegacy flag — see
+   * loadRacialTraitsFromRaces. */
+  isLegacy: boolean;
+}
+
+/**
+ * Loads every race's own `racialTraits[]` from races() and flattens them into
+ * one list, tagged with the owning race's name and native `isLegacy` flag.
+ *
+ * Not sourced from `ENDPOINTS.gameData.racialTraitCollection()` — confirmed
+ * live (2026-09-01 edition-awareness test suite, finding C4) to return
+ * `{ data: { definitionData: [], accessTypes: {} } }`, an object rather than
+ * an array, which crashed every `search_racial_traits` call with "items.map
+ * is not a function" regardless of race or edition. Its response message
+ * ("Optional racial traits successfully received") suggests it was never the
+ * right endpoint for a general trait catalog in the first place — mirrors
+ * loadAllClassFeatures' fix for the equivalent classFeatureCollection 404.
+ */
+async function loadRacialTraitsFromRaces(
+  client: DdbClient,
+  campaignId?: number,
+): Promise<DdbRacialTrait[]> {
+  const racesRaw = await client.get<DdbRace[]>(
+    ENDPOINTS.gameData.races(campaignId),
+    campaignCacheKey("game-data:races", campaignId),
+    86_400_000,
+  );
+  const races = (racesRaw ?? []).filter((r) => r.fullName || r.baseName).map(withRaceName);
+
+  const rows: DdbRacialTrait[] = [];
+  for (const race of races) {
+    for (const t of race.racialTraits ?? []) {
+      const def = t.definition;
+      if (!def?.name || !def?.description) continue;
+      rows.push({
+        id: def.id ?? 0,
+        name: def.name,
+        description: def.description,
+        snippet: def.snippet ?? "",
+        raceId: race.entityRaceId,
+        raceName: race.name,
+        isHomebrew: race.isHomebrew,
+        sources: race.sources,
+        // Race's own isLegacy is a native, authoritative flag (unlike
+        // classes/backgrounds/feats, which must derive it from source books
+        // via isLegacyBySource) — every trait it owns inherits it directly.
+        isLegacy: race.isLegacy,
+      });
+    }
+  }
+  return rows;
 }
 
 /**
@@ -2595,15 +2687,7 @@ export async function searchRacialTraits(
   client: DdbClient,
   params: RacialTraitSearchParams
 ): Promise<ToolResult> {
-  const cacheKey = "game-data:racial-traits";
-  const traits = await client.get<DdbRacialTrait[]>(
-    ENDPOINTS.gameData.racialTraitCollection(),
-    cacheKey,
-    86_400_000,
-  );
-
-  const config = await getGameConfigSafe(client);
-  let matched = withLegacyFlag(config, traits ?? []);
+  let matched: DdbRacialTrait[] = await loadRacialTraitsFromRaces(client, params.campaignId);
 
   if (params.name) {
     const searchName = params.name.toLowerCase();
@@ -2617,9 +2701,23 @@ export async function searchRacialTraits(
     );
   }
 
-  // Edition: collapse cross-edition duplicates (same race/trait name) to the
-  // selected edition.
-  matched = collapseByEdition(matched, params.edition);
+  // Edition: collapse cross-edition duplicates to the selected edition. Keyed
+  // on race name + trait name — not just trait name — since e.g. "Darkvision"
+  // is its own trait on Dwarf, Elf, Tiefling, etc. and must not collapse
+  // across races (mirrors searchClassFeatures' class+subclass+name keying).
+  if (params.edition) {
+    const byKey = new Map<string, typeof matched>();
+    for (const row of matched) {
+      const key = `${(row.raceName ?? "").toLowerCase()}|${row.name.toLowerCase()}`;
+      const arr = byKey.get(key);
+      if (arr) arr.push(row);
+      else byKey.set(key, [row]);
+    }
+    const wantLegacy = params.edition === "2014";
+    matched = Array.from(byKey.values()).map(
+      (group) => group.find((row) => row.isLegacy === wantLegacy) ?? group[0]
+    );
+  }
 
   matched.sort((a, b) => {
     // Sort by race name, then by trait name
@@ -2630,11 +2728,10 @@ export async function searchRacialTraits(
 
   const total = matched.length;
   matched = matched.slice(0, 30);
-  const configNote = configUnavailableNote(config, params.edition);
 
   if (matched.length === 0) {
     return {
-      content: [{ type: "text", text: `No racial traits found matching the search criteria.${configNote}` }],
+      content: [{ type: "text", text: "No racial traits found matching the search criteria." }],
     };
   }
 
@@ -2649,6 +2746,6 @@ export async function searchRacialTraits(
   }
 
   return {
-    content: [{ type: "text", text: lines.join("\n") + configNote }],
+    content: [{ type: "text", text: lines.join("\n") }],
   };
 }

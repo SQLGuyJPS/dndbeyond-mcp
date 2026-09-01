@@ -133,6 +133,20 @@ describe("getClass", () => {
     const result = await getClass(mockClient([rangerLegacy]), { className: "Nonexistent" });
     expect(result.content[0].text).toContain("not found");
   });
+
+  // Confirmed HIGH-severity defect via the 2026-09-01 edition-awareness test
+  // suite: with no edition requested, getClass used to return whichever
+  // candidate the API happened to list first (here, the legacy variant) —
+  // now defaults to DEFAULT_EDITION (2024) like every other edition-aware
+  // tool. Candidate order below (legacy first) is deliberate: it would have
+  // passed trivially the other way around.
+  it("defaults to the 2024 variant when no edition is given", async () => {
+    const result = await getClass(mockClient([rangerLegacy, rangerCurrent]), { className: "Ranger" });
+    const text = result.content[0].text;
+    expect(text).toContain("Hunter's Mark");
+    expect(text).not.toContain("tracking bonuses");
+    expect(text).toContain("*(2024)*");
+  });
 });
 
 describe("searchBackgrounds and getBackground edition", () => {
@@ -159,6 +173,11 @@ describe("searchBackgrounds and getBackground edition", () => {
   it("returns the 2014 background variant", async () => {
     const result = await getBackground(mockClient([nobleLegacy, nobleCurrent]), { backgroundName: "Noble", edition: "2014" });
     expect(result.content[0].text).toContain("Legacy noble upbringing");
+  });
+
+  it("defaults to the 2024 background variant when no edition is given", async () => {
+    const result = await getBackground(mockClient([nobleLegacy, nobleCurrent]), { backgroundName: "Noble" });
+    expect(result.content[0].text).toContain("Current noble upbringing");
   });
 });
 
@@ -203,6 +222,11 @@ describe("searchFeats and getFeat edition", () => {
     const result = await getFeat(mockClient([chefCurrent]), { featName: "Nonexistent Feat" });
     expect(result.content[0].text).toContain("not found");
   });
+
+  it("get_feat defaults to the 2024 variant when no edition is given", async () => {
+    const result = await getFeat(mockClient([chefLegacy, chefCurrent]), { featName: "Chef" });
+    expect(result.content[0].text).toContain("Current chef feat text");
+  });
 });
 
 describe("searchRaces and getRace edition", () => {
@@ -234,6 +258,20 @@ describe("searchRaces and getRace edition", () => {
     const result = await getRace(mockClient([elf2024]), { raceName: "Nonexistent Species" });
     expect(result.content[0].text).toContain("not found");
   });
+
+  // Confirmed HIGH-severity defect via the 2026-09-01 edition-awareness test
+  // suite: with no edition requested, getRace used to return whichever
+  // same-name candidate came first (legacy, per the fixture order below)
+  // rather than defaulting to DEFAULT_EDITION (2024).
+  it("defaults to the 2024 variant when no edition is given, for a race with a same-name legacy/current pair", async () => {
+    const dwarfLegacy = { entityRaceId: 10, fullName: "Dwarf", baseName: "Dwarf", baseRaceName: "Dwarf", description: "A legacy dwarf.", isHomebrew: false, isLegacy: true, isSubRace: false, size: "Medium", sources: [{ sourceId: 1 }] };
+    const dwarfCurrent = { entityRaceId: 1789134, fullName: "Dwarf", baseName: "Dwarf", baseRaceName: "Dwarf", description: "A current dwarf.", isHomebrew: false, isLegacy: false, isSubRace: false, size: "Medium", sources: [{ sourceId: 145 }] };
+    const result = await getRace(mockClient([dwarfLegacy, dwarfCurrent]), { raceName: "Dwarf" });
+    const text = result.content[0].text;
+    expect(text).toContain("A current dwarf");
+    expect(text).not.toContain("A legacy dwarf");
+    expect(text).toContain("*(2024)*");
+  });
 });
 
 describe("searchItems edition", () => {
@@ -261,5 +299,11 @@ describe("searchItems edition", () => {
 
     const item = await getItem(client, { itemName: "Sun Blade", edition: "2014" });
     expect(item.content[0].text).toContain("*(2014)*");
+  });
+
+  it("get_item defaults to the 2024 variant when no edition is given", async () => {
+    const client = { get: vi.fn().mockResolvedValue([bagLegacy, bagCurrent]), getRaw: vi.fn() } as unknown as DdbClient;
+    const result = await getItem(client, { itemName: "Bag of Holding" });
+    expect(result.content[0].text).toContain("*(2024)*");
   });
 });

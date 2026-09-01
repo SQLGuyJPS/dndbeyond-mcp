@@ -845,8 +845,10 @@ export async function startServer(): Promise<void> {
   server.tool(
     "list_sources",
     "List the account's source books (id + name) as JSON",
-    {},
-    async () => listSources(client),
+    {
+      nameFilter: z.string().optional().describe("Filter to source names containing this text (partial match, case-insensitive) — the full unfiltered list can be very large."),
+    },
+    async (params) => listSources(client, params.nameFilter),
   );
 
   // Register reference tools - feats
@@ -1071,12 +1073,14 @@ export async function startServer(): Promise<void> {
       name: z.string().optional().describe("Trait name (partial match)"),
       raceName: z.string().optional().describe("Race name to filter by (e.g., 'Elf', 'Dwarf')"),
       edition: editionParam,
+      campaignId: campaignIdParam,
     },
     async (params) =>
       searchRacialTraits(client, {
         name: params.name,
         raceName: params.raceName,
         edition: params.edition,
+        campaignId: params.campaignId,
       })
   );
 

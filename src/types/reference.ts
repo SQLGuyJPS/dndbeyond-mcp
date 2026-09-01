@@ -76,7 +76,7 @@ export interface ClassFeatureSearchParams extends CampaignScoped {
   edition?: Edition;
 }
 
-export interface RacialTraitSearchParams {
+export interface RacialTraitSearchParams extends CampaignScoped {
   name?: string;
   raceName?: string;
   edition?: Edition;
