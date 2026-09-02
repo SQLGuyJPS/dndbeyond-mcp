@@ -2157,7 +2157,7 @@ interface DdbRace {
   size: string;
   sources: Array<{ sourceId: number }>;
   racialTraits?: Array<{
-    definition: { id?: number; name: string; description: string; snippet?: string; hideOnDetailsPage?: boolean };
+    definition: { name: string; description: string; hideOnDetailsPage?: boolean };
   }>;
 }
 
@@ -2627,57 +2627,6 @@ interface DdbRacialTrait {
   raceName?: string;
   isHomebrew: boolean;
   sources: Array<{ sourceId: number }>;
-  /** Inherited directly from the owning race's native isLegacy flag — see
-   * loadRacialTraitsFromRaces. */
-  isLegacy: boolean;
-}
-
-/**
- * Loads every race's own `racialTraits[]` from races() and flattens them into
- * one list, tagged with the owning race's name and native `isLegacy` flag.
- *
- * Not sourced from `ENDPOINTS.gameData.racialTraitCollection()` — confirmed
- * live (2026-09-01 edition-awareness test suite, finding C4) to return
- * `{ data: { definitionData: [], accessTypes: {} } }`, an object rather than
- * an array, which crashed every `search_racial_traits` call with "items.map
- * is not a function" regardless of race or edition. Its response message
- * ("Optional racial traits successfully received") suggests it was never the
- * right endpoint for a general trait catalog in the first place — mirrors
- * loadAllClassFeatures' fix for the equivalent classFeatureCollection 404.
- */
-async function loadRacialTraitsFromRaces(
-  client: DdbClient,
-  campaignId?: number,
-): Promise<DdbRacialTrait[]> {
-  const racesRaw = await client.get<DdbRace[]>(
-    ENDPOINTS.gameData.races(campaignId),
-    campaignCacheKey("game-data:races", campaignId),
-    86_400_000,
-  );
-  const races = (racesRaw ?? []).filter((r) => r.fullName || r.baseName).map(withRaceName);
-
-  const rows: DdbRacialTrait[] = [];
-  for (const race of races) {
-    for (const t of race.racialTraits ?? []) {
-      const def = t.definition;
-      if (!def?.name || !def?.description) continue;
-      rows.push({
-        id: def.id ?? 0,
-        name: def.name,
-        description: def.description,
-        snippet: def.snippet ?? "",
-        raceId: race.entityRaceId,
-        raceName: race.name,
-        isHomebrew: race.isHomebrew,
-        sources: race.sources,
-        // Race's own isLegacy is a native, authoritative flag (unlike
-        // classes/backgrounds/feats, which must derive it from source books
-        // via isLegacyBySource) — every trait it owns inherits it directly.
-        isLegacy: race.isLegacy,
-      });
-    }
-  }
-  return rows;
 }
 
 /**
@@ -2687,7 +2636,15 @@ export async function searchRacialTraits(
   client: DdbClient,
   params: RacialTraitSearchParams
 ): Promise<ToolResult> {
-  let matched: DdbRacialTrait[] = await loadRacialTraitsFromRaces(client, params.campaignId);
+  const cacheKey = "game-data:racial-traits";
+  const traits = await client.get<DdbRacialTrait[]>(
+    ENDPOINTS.gameData.racialTraitCollection(),
+    cacheKey,
+    86_400_000,
+  );
+
+  const config = await getGameConfigSafe(client);
+  let matched = withLegacyFlag(config, traits ?? []);
 
   if (params.name) {
     const searchName = params.name.toLowerCase();
@@ -2701,23 +2658,9 @@ export async function searchRacialTraits(
     );
   }
 
-  // Edition: collapse cross-edition duplicates to the selected edition. Keyed
-  // on race name + trait name — not just trait name — since e.g. "Darkvision"
-  // is its own trait on Dwarf, Elf, Tiefling, etc. and must not collapse
-  // across races (mirrors searchClassFeatures' class+subclass+name keying).
-  if (params.edition) {
-    const byKey = new Map<string, typeof matched>();
-    for (const row of matched) {
-      const key = `${(row.raceName ?? "").toLowerCase()}|${row.name.toLowerCase()}`;
-      const arr = byKey.get(key);
-      if (arr) arr.push(row);
-      else byKey.set(key, [row]);
-    }
-    const wantLegacy = params.edition === "2014";
-    matched = Array.from(byKey.values()).map(
-      (group) => group.find((row) => row.isLegacy === wantLegacy) ?? group[0]
-    );
-  }
+  // Edition: collapse cross-edition duplicates (same race/trait name) to the
+  // selected edition.
+  matched = collapseByEdition(matched, params.edition);
 
   matched.sort((a, b) => {
     // Sort by race name, then by trait name
@@ -2728,10 +2671,11 @@ export async function searchRacialTraits(
 
   const total = matched.length;
   matched = matched.slice(0, 30);
+  const configNote = configUnavailableNote(config, params.edition);
 
   if (matched.length === 0) {
     return {
-      content: [{ type: "text", text: "No racial traits found matching the search criteria." }],
+      content: [{ type: "text", text: `No racial traits found matching the search criteria.${configNote}` }],
     };
   }
 
@@ -2746,6 +2690,6 @@ export async function searchRacialTraits(
   }
 
   return {
-    content: [{ type: "text", text: lines.join("\n") }],
+    content: [{ type: "text", text: lines.join("\n") + configNote }],
   };
 }

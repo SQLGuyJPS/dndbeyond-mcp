@@ -242,9 +242,11 @@ without trusting the agent's self-report.
 
 ### G11 — Racial traits (C4, known-broken endpoint)
 
-> **Status: fixed 2026-09-01.** `search_racial_traits` no longer fails — see §6/§7. Both sub-tests below
-> describe the defect as it stood when run; C4 confirmed it was systemic (every race, every edition argument),
-> not Dragonborn-specific, which shaped the fix.
+> **Status: confirmed broken, fix deferred.** A working fix was built and verified 2026-09-01 (see §6/§7), then
+> reverted the same day — `search_racial_traits` was explicitly agreed out of scope for this PR (see PR #12
+> discussion; C4 was to be "left as-is... dead but harmless"). C4 confirmed the defect is systemic (every race,
+> every edition argument), not Dragonborn-specific; a fix can be reintroduced from the reverted commit in a
+> follow-up PR.
 
 - **G11a** — what traits does a Dragonborn get?
   `search_racial_traits` fails against the live API (pre-existing, documented under Known issues). Expect the
@@ -398,14 +400,17 @@ subject confirmed it deliberately skipped 2014 per instruction. **PASS.**
    `nameFilter` parameter (matches both D&D Beyond's short source code and its full title) so a caller checking
    ownership of one or two books doesn't pay the full-list cost. The full unfiltered list is unchanged and still
    large by design — no pagination was added, since a single-book lookup was the actual pattern observed.
-4. **~~LOW~~ FIXED — `search_racial_traits` failed on every race and every edition argument tried.** G4b and
-   G11b both hit `items.map is not a function` regardless of which race or edition was requested, confirming C4
-   was systemic rather than Dragonborn-specific. Root cause: the endpoint it called
+4. **LOW, confirmed systemic — `search_racial_traits` fails on every race and every edition argument tried.**
+   G4b and G11b both hit `items.map is not a function` regardless of which race or edition was requested,
+   confirming C4 was systemic rather than Dragonborn-specific. Root cause: the endpoint it calls
    (`racial-trait/collection`) returns `{ data: { definitionData: [], accessTypes: {} } }` — an object, not an
    array — live, every time, for every account; its response message ("Optional racial traits successfully
-   received") suggests it was never the right endpoint for a general trait catalog. Fixed by building the trait
-   list from each race's own `racialTraits[]` (already used by `get_race`/`search_races`) instead — the same
-   fix pattern already used for `class-feature/collection`'s equivalent 404 elsewhere in this codebase.
+   received") suggests it was never the right endpoint for a general trait catalog. A fix (rebuilding the trait
+   list from each race's own `racialTraits[]`, already used by `get_race`/`search_races`) was built and
+   live-verified 2026-09-01, then reverted the same day: this tool was explicitly agreed out of scope for PR #12
+   (see PR discussion — C4 was to be "left as-is... dead but harmless"), and its behavior against the live API is
+   unchanged from before this suite ran. The reverted implementation remains available in git history
+   (commit `7756cc2`, prior to the revert) for a follow-up PR.
 5. **LOW — no tool reaches the 2024 grapple-escape rule.** It lives in the Unarmed Strike / Grapple action
    rules, not the condition entry, and no tool surfaces it. A subject correctly refused to supply it from memory
    and told the DM to check the rulebook — honest degradation, not a defect. Left open; worth a README coverage
@@ -429,8 +434,8 @@ just say it wasn't returned." Not implemented this session; noted for a future p
 
 ## 7. Fixes applied (2026-09-01)
 
-All three fixable findings above were implemented, tested (unit + live verification against the real D&D Beyond
-API), and merged into this branch the same session the full run completed:
+Two of the three fixable findings above are implemented, tested (unit + live verification against the real D&D
+Beyond API), and merged into this branch:
 
 - **Default-edition defect (finding 1).** `pickByEdition` in `src/tools/reference.ts` now resolves
   `edition ?? DEFAULT_EDITION` internally instead of falling back to `candidates[0]`; `getSubclass`'s equivalent
@@ -440,18 +445,20 @@ API), and merged into this branch the same session the full run completed:
   `getMonster`, `getRace`, and `getSubclass`, each with fixtures ordered so the legacy variant would win if the
   old `candidates[0]` behavior ever came back. `campaignId`'s edition-reordering side effect (finding 2) is
   covered by the same fix — no separate change needed.
-- **`search_racial_traits` crash (finding 4).** Rebuilt to source trait data from each race's own
-  `racialTraits[]` (via `races()`) instead of the non-functional `racial-trait/collection` endpoint. Also
-  threaded `campaignId` through, matching every other reference tool. Cross-edition collapsing is keyed on race
-  name + trait name (not trait name alone), so e.g. "Darkvision" on Dwarf and on Elf never merge into one row —
-  the same keying discipline `search_class_features` already uses for cross-class name collisions. 8 new unit
-  tests; live-verified against the real API (previously an unconditional crash on every race/edition; now
-  returns real trait data).
 - **`list_sources` size (finding 3).** Added an optional `nameFilter` parameter, matched against both the
   source's short code and its full title (the same matching `resolveSourceId` uses internally for the `source`
   filter on `search_items`/`search_monsters` — which had the identical "only matches the short code" limitation,
   fixed alongside this). Live-verified: an unfiltered call is still ~53k characters; a filtered call for one
   book's title returns a single-entry result.
 
-All three changes build clean (`npm run build`) and pass the full test suite (382 tests, including the new
+**`search_racial_traits` crash (finding 4) — fixed, then reverted.** A fix mirroring the `class-feature/
+collection` pattern (sourcing trait data from each race's own `racialTraits[]` via `races()` instead of the
+non-functional `racial-trait/collection` endpoint) was built, covered by 8 new unit tests, and live-verified
+against the real API the same day. It was reverted before push: `search_racial_traits` was explicitly scoped out
+of PR #12 in prior review discussion with the reviewer (C4 was to be "left as-is... dead but harmless"), and
+fixing it wasn't something this testing pass was meant to authorize on its own. The tool's behavior is unchanged
+from before this suite ran — see the updated G11 status above. The fix is preserved in git history and can be
+reintroduced as its own PR.
+
+Both kept changes build clean (`npm run build`) and pass the full test suite (374 tests, including the new
 regression coverage above) with no regressions.

@@ -1073,14 +1073,12 @@ export async function startServer(): Promise<void> {
       name: z.string().optional().describe("Trait name (partial match)"),
       raceName: z.string().optional().describe("Race name to filter by (e.g., 'Elf', 'Dwarf')"),
       edition: editionParam,
-      campaignId: campaignIdParam,
     },
     async (params) =>
       searchRacialTraits(client, {
         name: params.name,
         raceName: params.raceName,
         edition: params.edition,
-        campaignId: params.campaignId,
       })
   );
 
