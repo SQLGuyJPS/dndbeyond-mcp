@@ -13,11 +13,11 @@ This session used the live MCP server to answer a rules-comparison question (201
 
 ## 2. Environment recap
 
-- Repo: `C:\git\dndbeyond-mcp` (built from source, `dmjohnston89/dndbeyond-mcp` fork — the original `AlexWorland/dndbeyond-mcp` was never published to npm and had dependency vulnerabilities)
-- Auth config: `C:\Users\conta\.dndbeyond-mcp\config.json` (plaintext session cookie)
+- Repo: `<repo root>` (built from source, `dmjohnston89/dndbeyond-mcp` fork — the original `AlexWorland/dndbeyond-mcp` was never published to npm and had dependency vulnerabilities)
+- Auth config: `~/.dndbeyond-mcp/config.json` (plaintext session cookie)
 - Claude Desktop config: `%APPDATA%\Claude\claude_desktop_config.json`
 - Compendium downloader: v0.5.0, resumable JSON snapshot approach (`extract-compendium.mjs` in the repo is dead code, not what runs)
-- Test character used: **Eledar Avestan**, Aasimar Paladin (Oath of Glory) 9, campaign "Veterans United"
+- Test character used: a level-9 Aasimar Paladin (Oath of Glory) in a shared campaign
 
 ## 3. Executive summary
 
@@ -25,9 +25,20 @@ This session used the live MCP server to answer a rules-comparison question (201
 
 ## 4. What currently works (do not regress)
 
+*As of 2026-08-24, before the work described below.* Note that `get_class` and `get_feat`
+(used in the second table) were themselves added by this same PR's `b4864d9` — this handoff
+doc was committed afterward (`54eefa8`), so they postdate this section's "currently works"
+baseline even though they're exercised here. They're kept, in their own labelled table, so a
+later reader isn't misled into thinking they predate the PR.
+
+| Tool (pre-existing) | Call pattern | Result |
+|---|---|---|
+| `get_character` | `characterName="<test character>", detail="full"` | Returned complete, accurate class feature *definition text* for every feature the character currently has — including the full multi-level Oath of Glory Spells table (levels 3/5/9/13/17), even though the character is only level 9. This confirms feature definitions are static reference text pulled in whole, not derived/truncated from character level. |
+
+### Added by this work (`b4864d9`, same PR)
+
 | Tool | Call pattern | Result |
 |---|---|---|
-| `get_character` | `characterName="Eledar Avestan", detail="full"` | Returned complete, accurate class feature *definition text* for every feature the character currently has — including the full multi-level Oath of Glory Spells table (levels 3/5/9/13/17), even though the character is only level 9. This confirms feature definitions are static reference text pulled in whole, not derived/truncated from character level. |
 | `get_class` | `className="Paladin", edition="2024"` | Correct, full base-class writeup. |
 | `get_class` | `className="Paladin", edition="2014"` | Correct, full legacy base-class writeup. Confirms the `edition` parameter works correctly at the base-class level. |
 | `get_feat` | `featName="Glorious Defense"` | Correctly returned "not found" — this is *correct* behavior, since Glorious Defense is a class feature, not a Feat. Not a bug; noted here so it isn't mistaken for one. |

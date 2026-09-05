@@ -710,6 +710,7 @@ export async function startServer(): Promise<void> {
         .describe("School of magic (e.g., evocation, abjuration)"),
       concentration: z.boolean().optional().describe("Requires concentration"),
       ritual: z.boolean().optional().describe("Can be cast as ritual"),
+      edition: editionParam,
       campaignId: campaignIdParam,
     },
     async (params) =>
@@ -719,6 +720,7 @@ export async function startServer(): Promise<void> {
         school: params.school,
         concentration: params.concentration,
         ritual: params.ritual,
+        edition: params.edition,
         campaignId: params.campaignId,
       })
   );
@@ -728,10 +730,7 @@ export async function startServer(): Promise<void> {
     "Get full details for a specific spell by name from the compendium",
     {
       spellName: z.string().describe("The spell name"),
-      edition: z
-        .enum(["2014", "2024"])
-        .optional()
-        .describe("Rules edition to prefer: 2024 (current) or 2014 (legacy). Defaults to the first match."),
+      edition: editionParam,
       campaignId: campaignIdParam,
     },
     async (params) =>
@@ -846,8 +845,10 @@ export async function startServer(): Promise<void> {
   server.tool(
     "list_sources",
     "List the account's source books (id + name) as JSON",
-    {},
-    async () => listSources(client),
+    {
+      nameFilter: z.string().optional().describe("Filter to source names containing this text (partial match, case-insensitive) — the full unfiltered list can be very large."),
+    },
+    async (params) => listSources(client, params.nameFilter),
   );
 
   // Register reference tools - feats
@@ -896,7 +897,7 @@ export async function startServer(): Promise<void> {
       edition: z
         .enum(["2014", "2024"])
         .optional()
-        .describe("Rules edition: 2024 (current) or 2014 (legacy). Defaults to 2014."),
+        .describe("Rules edition: 2024 (current) or 2014 (legacy). Defaults to 2024 (current)."),
     },
     async (params) =>
       getCondition(client, {
@@ -1049,7 +1050,7 @@ export async function startServer(): Promise<void> {
     "Search for class features by name, class, or level",
     {
       name: z.string().optional().describe("Feature name (partial match)"),
-      className: z.string().optional().describe("Class name to filter by (e.g., 'Fighter', 'Wizard')"),
+      className: z.string().optional().describe("Class name to filter by (e.g., 'Fighter', 'Wizard'). Omitting this searches every class and is slower on a cold cache."),
       level: z.coerce.number().optional().describe("Class level requirement"),
       edition: editionParam,
       campaignId: campaignIdParam,

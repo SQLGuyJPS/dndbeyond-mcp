@@ -17,6 +17,7 @@ export interface SpellSearchParams extends CampaignScoped {
   school?: string;
   concentration?: boolean;
   ritual?: boolean;
+  edition?: Edition;
 }
 
 export interface MonsterSearchParams {

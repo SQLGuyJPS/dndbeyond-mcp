@@ -257,7 +257,10 @@ describe("searchItems source/page", () => {
     expect(text).toMatch(/Ccc Cloak/);
     expect(text).not.toMatch(/Bbb Ring/);
     expect(text).toMatch(/2 found/);
-    expect(text).toMatch(/Aaa Blade\*\* — Rare Weapon \[#1\]/);
+    // MOCK_CONFIG_WITH_SOURCES's "Test Book" source has no sourceCategoryId,
+    // so isLegacyBySource can't determine an edition — [edition unknown] is
+    // the honest tri-state tag (B2), not a silently-assumed 2024.
+    expect(text).toMatch(/Aaa Blade\*\* \[edition unknown\] — Rare Weapon \[#1\]/);
     expect(text).toMatch(/\[#3\]/); // Ccc Cloak
   });
 

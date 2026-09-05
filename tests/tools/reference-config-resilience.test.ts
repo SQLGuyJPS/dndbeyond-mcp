@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { searchClasses, searchBackgrounds, searchFeats } from "../../src/tools/reference.js";
+import { searchClasses, getClass, searchBackgrounds, searchFeats } from "../../src/tools/reference.js";
 import { DdbClient } from "../../src/api/client.js";
 
 // Regression coverage for a behavior change introduced by edition support:
@@ -26,6 +26,29 @@ describe("reference tools degrade gracefully when game config is unavailable", (
     const result = await searchClasses(mockClientWithFailingConfig(classes), {});
     expect(result.content[0].text).toContain("Fighter");
     expect(result.content[0].text).not.toContain("*(Legacy)*");
+  });
+
+  // B2 tri-state regression: this is the case the original heuristic got most
+  // wrong — a config outage combined with an *explicit* edition request used
+  // to render a confident (and backwards) `[2024]` mismatch tag on every row,
+  // rather than admitting nothing could be determined.
+  it("searchClasses tags rows '[edition unknown]' (never a confident [2024]) and notes the outage when edition is requested during a config failure", async () => {
+    const classes = [{ id: 10, name: "Fighter", description: "", hitDice: 10, isHomebrew: false, spellCastingAbilityId: null, sources: [{ sourceId: 1 }] }];
+    const result = await searchClasses(mockClientWithFailingConfig(classes), { edition: "2014" });
+    const text = result.content[0].text;
+    expect(text).toContain("Fighter");
+    expect(text).toContain("[edition unknown]");
+    expect(text).not.toContain("[2024]");
+    expect(text).toContain("Edition could not be determined");
+  });
+
+  it("getClass labels the result 'edition undetermined' (never a confident *(2024)*) when config fails", async () => {
+    const classes = [{ id: 10, name: "Fighter", description: "", hitDice: 10, isHomebrew: false, spellCastingAbilityId: null, sources: [{ sourceId: 1 }] }];
+    const result = await getClass(mockClientWithFailingConfig(classes), { className: "Fighter", edition: "2014" });
+    const text = result.content[0].text;
+    expect(text).toContain("*(edition undetermined)*");
+    expect(text).not.toContain("*(2024)*");
+    expect(text).toContain("Edition could not be determined");
   });
 
   it("searchBackgrounds still returns results (untagged) when config fetch fails", async () => {

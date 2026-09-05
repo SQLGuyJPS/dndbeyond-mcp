@@ -88,7 +88,7 @@ export const ENDPOINTS = {
     },
     // NOTE: there is no `class-feature/collection` endpoint on the live API —
     // every variant of it 404s (confirmed by live probing 2026-08-24; see
-    // dndbeyond-mcp-class-feature-handoff.md). Base-class features live on
+    // docs/plans/2026-08-24-subclass-feature-independence-handoff.md). Base-class features live on
     // `classes()` and subclass features live on `subclasses()` below;
     // searchClassFeatures in src/tools/reference.ts builds its corpus from
     // those two instead of this endpoint. Kept only as a documented dead end

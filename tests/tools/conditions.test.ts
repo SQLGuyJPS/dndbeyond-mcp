@@ -22,9 +22,10 @@ describe("getCondition edition selection", () => {
     expect(out).toMatch(/Level 6: Death/);
   });
 
-  it("defaults to 2014 when edition is omitted", async () => {
+  it("defaults to 2024 when edition is omitted (D2b: flipped from 2014, matching every other edition-aware tool's default)", async () => {
     const out = await text(getCondition(stub, { conditionName: "exhaustion" }));
-    expect(out).toMatch(/Level 1: Disadvantage on ability checks/);
+    expect(out).toMatch(/D20 Test/i);
+    expect(out).not.toMatch(/Level 1: Disadvantage on ability checks/);
   });
 
   it("serves an unchanged condition (poisoned) under 2024", async () => {
@@ -36,5 +37,19 @@ describe("getCondition edition selection", () => {
     const out = await text(getCondition(stub, { conditionName: "exhaust", edition: "2024" }));
     expect(out).toMatch(/D20 Test/i);          // matched the 2024 Exhaustion, not 2014
     expect(out).not.toMatch(/Level 1: Disadvantage on ability checks/);
+  });
+
+  // D2a: previously emitted no edition marker at all, so a caller couldn't
+  // tell (without cross-referencing rules text) which ruleset the response
+  // actually came from.
+  it("labels the header with the returned edition", async () => {
+    const current = await text(getCondition(stub, { conditionName: "grappled", edition: "2024" }));
+    expect(current).toContain("# Grappled *(2024)*");
+
+    const legacy = await text(getCondition(stub, { conditionName: "grappled", edition: "2014" }));
+    expect(legacy).toContain("# Grappled *(2014)*");
+
+    const defaulted = await text(getCondition(stub, { conditionName: "grappled" }));
+    expect(defaulted).toContain("# Grappled *(2024)*");
   });
 });

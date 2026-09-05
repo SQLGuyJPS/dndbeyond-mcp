@@ -115,6 +115,38 @@ describe("Live: Item endpoints", () => {
     expect(text).toBeDefined();
     expect(text.length).toBeGreaterThan(0);
   });
+
+  // A1: whether the live items payload actually carries a native `isLegacy`
+  // flag was unconfirmed at review time — searchItems/getItem apply a
+  // sources[]-derived fallback either way (see reference-editions.test.ts),
+  // but this is the one assertion that tells us whether that fallback is
+  // purely defensive or actually load-bearing. Gating result for A1 — see
+  // docs/plans/2026-08-26-pr12-review-response.md.
+  it("should carry a native isLegacy flag on the raw items payload", async () => {
+    const client = await getLiveClient();
+    const items = await client.get<Array<{ isLegacy?: boolean }>>(
+      ENDPOINTS.gameData.items(),
+      "live-items-raw",
+      60_000,
+    );
+
+    expect(items.some((i) => typeof i.isLegacy === "boolean")).toBe(true);
+    expect(items.some((i) => i.isLegacy === true)).toBe(true);
+  });
+
+  it("should collapse a reprinted magic item to the requested edition", async () => {
+    const client = await getLiveClient();
+    // Bag of Holding is reprinted 2014 -> 2024 and free/owned content, so
+    // this account should always see both variants pre-collapse.
+    const both = await searchItems(client, { name: "bag of holding" });
+    expect(both.content[0].text.match(/Bag of Holding/g)?.length).toBe(2);
+
+    const legacy = await searchItems(client, { name: "bag of holding", edition: "2014" });
+    expect(legacy.content[0].text.match(/Bag of Holding/g)?.length).toBe(1);
+
+    const legacyItem = await getItem(client, { itemName: "Bag of Holding", edition: "2014" });
+    expect(legacyItem.content[0].text).toContain("*(2014)*");
+  });
 });
 
 describe("Live: Feat endpoints", () => {
@@ -134,6 +166,48 @@ describe("Live: Feat endpoints", () => {
     expect(text).toContain("# Chef");
     // A real description, not just the not-found fallback.
     expect(text.length).toBeGreaterThan(50);
+  });
+
+  // A1 step 6: feats had no live edition coverage at all before this plan.
+  // Confirmed live (2026-08-29) that this account's feats() payload carries
+  // no native `isLegacy` at all (feats never do — see isLegacyBySource's doc
+  // comment) and only one "Chef" (the 2024 printing, source id 145) — the
+  // legacy Chef comes from a sourcebook this particular account doesn't own,
+  // so a strict "both editions" assertion isn't portable across accounts.
+  // What *is* portable, and is the actual regression this guards: a
+  // recognized source must resolve to a definite true/false, never the
+  // "[edition unknown]"/"*(edition undetermined)*" tri-state fallback (that
+  // would mean the derivation broke, e.g. config stopped listing source 145).
+  it("should resolve Chef's edition via source-derivation, never as undetermined", async () => {
+    const client = await getLiveClient();
+    const result = await searchFeats(client, { name: "chef" });
+    const text = result.content[0].text;
+
+    expect(text).toContain("Chef");
+    expect(text).not.toContain("edition unknown");
+
+    if ((text.match(/\*\*Chef\*\*/g)?.length ?? 0) > 1) {
+      // This account happens to own both printings — the stronger assertion applies.
+      expect(text).toMatch(/\*\*Chef\*\* \*\(Legacy\)\*/);
+    }
+  });
+
+  it("should label get_feat's header with a definite edition, never undetermined", async () => {
+    const client = await getLiveClient();
+    const current = await getFeat(client, { featName: "Chef", edition: "2024" });
+    const legacy = await getFeat(client, { featName: "Chef", edition: "2014" });
+
+    expect(current.content[0].text).toContain("*(2024)*");
+    // If this account doesn't own the legacy printing, pickByEdition falls
+    // back to the only variant that exists (2024) rather than erroring —
+    // documented, correct behavior, not a bug. Assert *some* definite label
+    // either way; only assert it's specifically *(2014)* when that variant
+    // is actually present.
+    expect(legacy.content[0].text).toMatch(/\*\(20(14|24)\)\*/);
+    expect(legacy.content[0].text).not.toContain("undetermined");
+    if (legacy.content[0].text !== current.content[0].text) {
+      expect(legacy.content[0].text).toContain("*(2014)*");
+    }
   });
 });
 
@@ -193,7 +267,7 @@ describe("Live: Class endpoints", () => {
 
 describe("Live: Subclass endpoints", () => {
   // Regression coverage for the gap described in
-  // dndbeyond-mcp-class-feature-handoff.md: subclass features were only
+  // docs/plans/2026-08-24-subclass-feature-independence-handoff.md: subclass features were only
   // reachable through a character who already had that subclass at a high
   // enough level. These assert the character-independent path works.
 
@@ -314,6 +388,41 @@ describe("Live: campaignId support", () => {
     // No campaign on this account currently shares it — not a failure, just
     // means this account's campaign-sharing state has changed since the
     // original investigation.
+  }, 60_000);
+
+  it("a campaign-scoped feat lookup either matches or exceeds the unscoped one", async () => {
+    const client = await getLiveClient();
+    const campaigns = await client.get<DdbCampaign[]>(ENDPOINTS.campaign.list(), "live-campaigns-raw", 60_000);
+
+    if (!campaigns || campaigns.length === 0) {
+      return;
+    }
+
+    // Mirrors the Oath of Glory test above, for the entity that actually
+    // surfaced this gap (see the "should resolve Chef's edition" test in the
+    // feat block above). Feats don't behave like subclasses here: get_feat's
+    // edition pick falls back to whichever printing exists instead of
+    // reporting "not found", so a present-but-wrong-edition *(2024)* tag is
+    // the unscoped-ownership signal, not absence. Best-effort: if this
+    // account owns legacy Chef outright, or none of its campaigns currently
+    // share it, that's a valid outcome too — this only asserts the positive
+    // case when the account state actually supports it.
+    const unscoped = await getFeat(client, { featName: "Chef", edition: "2014" });
+    if (unscoped.content[0].text.includes("*(2014)*")) {
+      return; // Already owned outright — campaignId isn't the deciding factor here.
+    }
+
+    for (const campaign of campaigns) {
+      const scoped = await getFeat(client, { featName: "Chef", edition: "2014", campaignId: campaign.id });
+      if (scoped.content[0].text.includes("*(2014)*")) {
+        expect(scoped.content[0].text).toContain("# Chef");
+        return; // Found a campaign that unlocks it — regression confirmed.
+      }
+    }
+    // No campaign on this account currently shares it — not a failure, just
+    // means this account's campaign-sharing state has changed since this was
+    // confirmed live (2026-08-30) via a campaign sharing Tasha's Cauldron of
+    // Everything.
   }, 60_000);
 });
 

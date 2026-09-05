@@ -16,8 +16,16 @@ describe("pickByEdition", () => {
   it("falls back to the only variant present when no edition match", () => {
     expect(pickByEdition([legacy], "2024")).toBe(legacy);
   });
-  it("returns the first candidate when edition is omitted", () => {
-    expect(pickByEdition([legacy, modern], undefined)).toBe(legacy);
+  it("defaults to the current (2024/non-legacy) variant when edition is omitted", () => {
+    // Was `.toBe(legacy)` — pickByEdition used to fall back to raw candidate
+    // order (candidates[0]) when no edition was given, which meant every
+    // get_* detail tool's no-edition behavior silently depended on whatever
+    // order the API happened to return same-name variants in. Fixed to
+    // default to DEFAULT_EDITION (2024), matching search_*/get_condition.
+    expect(pickByEdition([legacy, modern], undefined)).toBe(modern);
+  });
+  it("falls back to the only variant present even when it doesn't match DEFAULT_EDITION", () => {
+    expect(pickByEdition([legacy], undefined)).toBe(legacy);
   });
 });
 
@@ -290,6 +298,25 @@ describe("searchMonsters edition", () => {
     const result = await searchMonsters(mc, { name: "goblin" });
     expect(result.content[0].text.match(/\*\*Goblin\*\*/g)).toHaveLength(2);
   });
+
+  // D3: searchMonsters used to hand-roll its own edition ternary that, unlike
+  // every other search tool, omitted the no-edition "*(Legacy)*" tag —  two
+  // same-name monsters rendered indistinguishably. Now routed through the
+  // shared editionSuffix, which does tag the legacy row.
+  it("tags the legacy row '*(Legacy)*' so two same-name monsters are distinguishable with no edition passed", async () => {
+    const data = [
+      monsterVariant({ id: 1, name: "Goblin", isLegacy: true }),
+      monsterVariant({ id: 2, name: "Goblin", isLegacy: false }),
+    ];
+    const mc = createRoutingMockClient([
+      { accessType: {}, pagination: { take: 20, skip: 0, currentPage: 1, pages: 1, total: 2 }, data },
+    ]);
+    const result = await searchMonsters(mc, { name: "goblin" });
+    const text = result.content[0].text;
+    expect(text.match(/\*\*Goblin\*\*/g)).toHaveLength(2);
+    expect(text).toMatch(/\*\*Goblin\*\* \*\(Legacy\)\*/);
+    expect(text.match(/\*\(Legacy\)\*/g)).toHaveLength(1); // only the legacy row, not the current one
+  });
 });
 
 describe("getMonster edition", () => {
@@ -318,6 +345,57 @@ describe("getMonster edition", () => {
     const nonConfig = urls.filter((u) => !u.includes("config"));
     expect(nonConfig.some((u) => u.includes("22"))).toBe(true);
     expect(nonConfig.some((u) => u.includes("11"))).toBe(false);
+  });
+
+  // D4: getMonster previously printed no edition marker at all, so a caller
+  // couldn't tell which variant pickByEdition actually handed them.
+  it("labels the header with the returned variant's edition", async () => {
+    const search = {
+      accessType: {},
+      pagination: { take: 10, skip: 0, currentPage: 1, pages: 1, total: 2 },
+      data: [
+        monsterVariant({ id: 11, name: "Goblin", isLegacy: true }),
+        monsterVariant({ id: 22, name: "Goblin", isLegacy: false }),
+      ],
+    };
+    const getRaw = vi.fn(async (url: string) => {
+      if (url.includes("config")) return MOCK_CONFIG;
+      if (url.includes("22")) return { data: monsterVariant({ id: 22, name: "Goblin", isLegacy: false }) };
+      if (url.includes("11")) return { data: monsterVariant({ id: 11, name: "Goblin", isLegacy: true }) };
+      return search;
+    });
+    const mc = { get: vi.fn(), getRaw } as unknown as DdbClient;
+
+    const current = await getMonster(mc, { monsterName: "Goblin", edition: "2024" });
+    expect(current.content[0].text).toContain("*(2024)*");
+
+    const legacy = await getMonster(mc, { monsterName: "Goblin", edition: "2014" });
+    expect(legacy.content[0].text).toContain("*(2014)*");
+  });
+
+  // Confirmed HIGH-severity defect via the 2026-09-01 edition-awareness test
+  // suite: with no edition requested, getMonster used to return whichever
+  // candidate the search endpoint listed first (legacy id 11, per the fixture
+  // order above) rather than defaulting to DEFAULT_EDITION (2024).
+  it("defaults to the 2024 variant when no edition is given", async () => {
+    const search = {
+      accessType: {},
+      pagination: { take: 10, skip: 0, currentPage: 1, pages: 1, total: 2 },
+      data: [
+        monsterVariant({ id: 11, name: "Goblin", isLegacy: true }),
+        monsterVariant({ id: 22, name: "Goblin", isLegacy: false }),
+      ],
+    };
+    const getRaw = vi.fn(async (url: string) => {
+      if (url.includes("config")) return MOCK_CONFIG;
+      if (url.includes("22")) return { data: monsterVariant({ id: 22, name: "Goblin", isLegacy: false }) };
+      if (url.includes("11")) return { data: monsterVariant({ id: 11, name: "Goblin", isLegacy: true }) };
+      return search;
+    });
+    const mc = { get: vi.fn(), getRaw } as unknown as DdbClient;
+
+    const result = await getMonster(mc, { monsterName: "Goblin" });
+    expect(result.content[0].text).toContain("*(2024)*");
   });
 });
 

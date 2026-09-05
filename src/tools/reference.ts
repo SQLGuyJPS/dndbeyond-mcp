@@ -17,7 +17,7 @@ interface GameConfig {
   alignments: Array<{ id: number; name: string }>;
   damageTypes: Array<{ id: number; name: string }>;
   senses: Array<{ id: number; name: string }>;
-  sources?: Array<{ id: number; name: string; sourceCategoryId?: number }>;
+  sources?: Array<{ id: number; name: string; description?: string; sourceCategoryId?: number }>;
   damageAdjustments: Array<{ id: number; name: string; type: number }>;
 }
 
@@ -82,7 +82,16 @@ async function getGameConfigSafe(client: DdbClient): Promise<GameConfig | undefi
 function resolveSourceId(config: GameConfig, source?: string): number | undefined {
   if (!source) return undefined;
   const q = source.toLowerCase().trim();
-  const fromConfig = config.sources?.find((s) => s.name.toLowerCase().includes(q) || q.includes(s.name.toLowerCase()));
+  // Match against both the short code D&D Beyond's config uses for `name`
+  // (e.g. "PHB", "TCoE") and its full-title `description` (e.g. "Tasha's
+  // Cauldron of Everything") — a caller passing the book's real title, not
+  // its internal abbreviation, would otherwise never match anything here.
+  const fromConfig = config.sources?.find(
+    (s) =>
+      s.name.toLowerCase().includes(q) ||
+      q.includes(s.name.toLowerCase()) ||
+      s.description?.toLowerCase().includes(q)
+  );
   if (fromConfig) return fromConfig.id;
   return SOURCE_MAP[q];
 }
@@ -145,6 +154,13 @@ interface DdbMonster {
 
 // Class IDs for building the full spell compendium
 const SPELLCASTING_CLASS_IDS = [1, 2, 3, 4, 5, 6, 7, 8]; // Bard through Wizard
+
+// D7a: the single named interception point for "what edition do we show when
+// the caller doesn't say?" — today a constant equal to every other tool's
+// implicit default; a future config-driven per-user preference (see
+// docs/design/2026-08-26-edition-preference-design.md) only has to change
+// this one spot instead of every `?? "2024"` call site.
+const DEFAULT_EDITION: Edition = "2024";
 
 /**
  * Loads the full spell compendium by querying always-known-spells and always-prepared-spells for all classes.
@@ -238,6 +254,17 @@ async function loadSpellCompendium(client: DdbClient, campaignId?: number): Prom
 }
 
 /**
+ * Projects a DdbSpell into the shape collapseByEdition/pickByEdition need —
+ * both operate on top-level `name`/`isLegacy`, but DdbSpell nests both under
+ * `.definition`. Returns a new object (rather than mutating the input) since
+ * DdbSpell instances here come from the shared TTL cache and may be reused
+ * across calls.
+ */
+function asEditionRanked(spell: DdbSpell): DdbSpell & EditionRanked {
+  return { ...spell, name: spell.definition.name, isLegacy: spell.definition.isLegacy };
+}
+
+/**
  * Searches for spells matching the given parameters.
  * Uses the full spell compendium from always-known-spells endpoints.
  */
@@ -288,15 +315,12 @@ export async function searchSpells(
     );
   }
 
-  // Collapse 2014/2024 duplicates to one row per name (prefer the 2024 variant).
-  const byName = new Map<string, DdbSpell>();
-  for (const s of matchedSpells) {
-    const existing = byName.get(s.definition.name);
-    if (!existing || (existing.definition.isLegacy && !s.definition.isLegacy)) {
-      byName.set(s.definition.name, s);
-    }
-  }
-  matchedSpells = Array.from(byName.values());
+  // Collapse 2014/2024 duplicates to one row per name, preferring the
+  // requested edition — or DEFAULT_EDITION when none is given, which
+  // preserves the old hardcoded "always prefer 2024" behavior rather than
+  // regressing to collapseByEdition's no-op-when-undefined default (that
+  // would resurrect duplicate same-name rows for every unfiltered search).
+  matchedSpells = collapseByEdition(matchedSpells.map(asEditionRanked), params.edition ?? DEFAULT_EDITION);
 
   // Sort by level then name
   matchedSpells.sort((a, b) => {
@@ -317,9 +341,15 @@ export async function searchSpells(
     if (spell.definition.concentration) tags.push("Concentration");
     if (spell.definition.ritual) tags.push("Ritual");
     const tagStr = tags.length > 0 ? ` (${tags.join(", ")})` : "";
+    // Same DEFAULT_EDITION fallback as the collapse above: with no edition
+    // requested, a spell that only exists pre-2024 had to fall back to its
+    // 2014 variant during the collapse, so it's tagged here — new
+    // information the old hand-rolled collapse never surfaced, not a
+    // regression (see D1 in the PR #12 review-response plan).
+    const editionTag = editionSuffix(spell.definition.isLegacy, params.edition ?? DEFAULT_EDITION);
 
     lines.push(
-      `- **${spell.definition.name}** — ${level}, ${spell.definition.school}${tagStr}`
+      `- **${spell.definition.name}**${editionTag} — ${level}, ${spell.definition.school}${tagStr}`
     );
   }
 
@@ -333,7 +363,7 @@ export async function searchSpells(
  */
 export async function getSpell(
   client: DdbClient,
-  params: { spellName: string; edition?: "2014" | "2024"; campaignId?: number },
+  params: { spellName: string; edition?: Edition; campaignId?: number },
   _characterIds?: number[]
 ): Promise<ToolResult> {
   const searchName = params.spellName.toLowerCase();
@@ -362,11 +392,7 @@ export async function getSpell(
 
   // Pick the variant matching the requested edition (2024 = non-legacy, 2014 =
   // legacy); fall back to whatever exists if only one edition is present.
-  let spell = candidates[0];
-  if (params.edition) {
-    const wantLegacy = params.edition === "2014";
-    spell = candidates.find((s) => Boolean(s.definition.isLegacy) === wantLegacy) ?? candidates[0];
-  }
+  const spell = pickByEdition(candidates.map(asEditionRanked), params.edition);
 
   return formatSpellDetails(spell);
 }
@@ -424,7 +450,7 @@ function formatSpellDetails(spell: DdbSpell): ToolResult {
   const tagStr = tags.length > 0 ? ` (${tags.join(", ")})` : "";
 
   const lines = [
-    `# ${def.name}`,
+    `# ${def.name}${editionHeaderLabel(def.isLegacy)}`,
     `*${level} ${def.school}${tagStr}*\n`,
     `**Casting Time:** ${castingTime}`,
     `**Range:** ${range}`,
@@ -476,15 +502,25 @@ export type EditionRanked = {
 
 /**
  * Pick the variant matching the requested edition (2024 = non-legacy, 2014 =
- * legacy); fall back to the first candidate when no edition is given or none match.
- * Mirrors getSpell's variant selection.
+ * legacy); fall back to the first candidate when none match. Mirrors getSpell's
+ * variant selection.
+ *
+ * When no edition is given, falls back to DEFAULT_EDITION rather than
+ * `candidates[0]` — every one of this function's callers is a singular get_*
+ * detail lookup (getSpell, getMonster, getItem, getFeat, getClass, getRace,
+ * getBackground) that must return exactly one entity, so an unrequested
+ * edition used to resolve to whatever order the API happened to return
+ * candidates in — frequently the 2014 variant — rather than the same 2024
+ * default every other edition-aware tool (search_*, get_condition) already
+ * uses. Confirmed via the 2026-09-01 edition-awareness test suite (see
+ * docs/plans/2026-08-31-edition-awareness-test-plan.md) as a HIGH-severity,
+ * cross-tool-inconsistent defect.
  */
 export function pickByEdition<T extends EditionRanked>(
   candidates: T[],
   edition?: Edition,
 ): T {
-  if (!edition) return candidates[0];
-  const wantLegacy = edition === "2014";
+  const wantLegacy = (edition ?? DEFAULT_EDITION) === "2014";
   return candidates.find((c) => Boolean(c.isLegacy) === wantLegacy) ?? candidates[0];
 }
 
@@ -517,49 +553,100 @@ export function collapseByEdition<T extends EditionRanked>(
 }
 
 // D&D Beyond source-category IDs that distinguish 2014 ("5e") rulebooks from 2024
-// ("5.5e") ones — see the `sourceCategories` list at /api/config/json. The current-
-// edition counterparts are category 24 ("5.5e Core Rules") and 38 ("5.5e Expanded
-// Rules"); everything outside both sets (homebrew, campaign settings, Critical
-// Role, etc.) isn't tied to a specific edition and defaults to non-legacy below.
+// ("5.5e") ones — see the `sourceCategories` list at /api/config/json.
 const LEGACY_SOURCE_CATEGORY_IDS = new Set([1, 23, 26]); // 5e Expanded Rules, Legacy/Noncore, 5e Core Rules
+// The current-edition counterparts. A source landing in neither set (homebrew,
+// campaign settings, Critical Role, etc.) is a *recognized* source that just
+// isn't tied to a specific edition — that's still a confident "false" below,
+// distinct from not being able to determine anything at all.
+const CURRENT_SOURCE_CATEGORY_IDS = new Set([24, 38]); // 5.5e Core Rules, 5.5e Expanded Rules
 
 /**
  * Derives 2014-vs-2024 edition status from an entity's primary source book, for
  * entity types (classes, backgrounds, feats, ...) whose game-data payload doesn't
- * carry an explicit `isLegacy` flag the way monsters/items/races/spells do. Falls
- * back to non-legacy (2024) when the source or its category is unrecognized.
+ * carry an explicit `isLegacy` flag the way monsters/items/races/spells do.
+ *
+ * Returns `undefined` — genuinely unknown, not "assume 2024" — whenever the
+ * question can't actually be answered: the config fetch failed, the config
+ * omits its `sources` list, or the entity's source isn't among the ones config
+ * knows about. Only returns a real `boolean` once the source is recognized:
+ * `true`/`false` for the two edition-tied category sets, `false` for a
+ * recognized source outside both (it's confidently not edition-specific, which
+ * is a different fact than "we don't know"). Callers must not coerce this
+ * result with `Boolean()` — that silently turns "unknown" into "2024" again,
+ * which is exactly the bug this tri-state exists to avoid; use it as-is (or
+ * via editionHeaderLabel/editionSuffix, which handle all three states).
  */
-export function isLegacyBySource(config: GameConfig | undefined, sources?: Array<{ sourceId: number }>): boolean {
+export function isLegacyBySource(config: GameConfig | undefined, sources?: Array<{ sourceId: number }>): boolean | undefined {
   const sourceId = sources?.[0]?.sourceId;
-  if (sourceId === undefined) return false;
-  const categoryId = config?.sources?.find((s) => s.id === sourceId)?.sourceCategoryId;
-  return categoryId !== undefined && LEGACY_SOURCE_CATEGORY_IDS.has(categoryId);
+  if (sourceId === undefined) return undefined;
+  if (!config?.sources) return undefined;
+  const categoryId = config.sources.find((s) => s.id === sourceId)?.sourceCategoryId;
+  if (categoryId === undefined) return undefined;
+  if (LEGACY_SOURCE_CATEGORY_IDS.has(categoryId)) return true;
+  if (CURRENT_SOURCE_CATEGORY_IDS.has(categoryId)) return false;
+  return false; // Recognized source, but not tied to either edition.
 }
 
 /**
  * Annotates entities that carry a `sources` list (but no native `isLegacy` field)
  * with a computed `isLegacy` flag, making them usable with pickByEdition /
- * collapseByEdition just like monsters, items, races, and spells.
+ * collapseByEdition just like monsters, items, races, and spells. `isLegacy` is
+ * `undefined` (not a coerced `false`) whenever isLegacyBySource couldn't
+ * determine it — see its doc comment.
  */
 function withLegacyFlag<T extends { sources?: Array<{ sourceId: number }> }>(
   config: GameConfig | undefined,
   items: T[],
-): (T & { isLegacy: boolean })[] {
+): (T & { isLegacy: boolean | undefined })[] {
   return items.map((item) => ({ ...item, isLegacy: isLegacyBySource(config, item.sources) }));
 }
 
 /**
- * Formats an edition-indicator suffix for a list row. With no edition requested,
- * legacy entries are always tagged "(Legacy)" so same-name 2014/2024 rows (e.g. two
- * "Fighter" classes) stay distinguishable. With an edition requested, results have
- * already been collapsed to one row per name, so the tag only appears when that row
- * had to fall back to the other edition because no matching variant exists.
+ * Formats an edition-indicator suffix for a list row. `isLegacy === undefined`
+ * (edition genuinely undetermined — see isLegacyBySource) always renders
+ * "[edition unknown]", regardless of whether an edition was requested: a
+ * confident-looking [2014]/[2024] tag here would be worse than no tag, since
+ * the row's true edition is not actually known. Otherwise: with no edition
+ * requested, legacy entries are tagged "(Legacy)" so same-name 2014/2024 rows
+ * (e.g. two "Fighter" classes) stay distinguishable; with an edition
+ * requested, results have already been collapsed to one row per name, so the
+ * tag only appears when that row had to fall back to the other edition
+ * because no matching variant exists.
  */
-function editionSuffix(isLegacy: boolean, edition?: Edition): string {
+function editionSuffix(isLegacy: boolean | undefined, edition?: Edition): string {
+  if (isLegacy === undefined) return " [edition unknown]";
   if (edition) {
+    // isLegacy is already a real boolean here (not undefined), so this
+    // Boolean() is just documenting the comparison's intent, not coercing
+    // away a missing value.
     return Boolean(isLegacy) !== (edition === "2014") ? (isLegacy ? " [2014]" : " [2024]") : "";
   }
   return isLegacy ? " *(Legacy)*" : "";
+}
+
+/**
+ * Formats the "*(2014)*"/"*(2024)*"/"*(edition undetermined)*" header suffix
+ * shared by every get_* detail handler (getClass, getFeat, getSubclass,
+ * getRace, getBackground, getCondition, and — per D4 — getItem/getMonster/
+ * getSpell), so a caller can always tell which variant `pickByEdition` (or the
+ * hardcoded getCondition table) actually handed them, instead of assuming.
+ */
+function editionHeaderLabel(isLegacy: boolean | undefined): string {
+  if (isLegacy === undefined) return " *(edition undetermined)*";
+  return isLegacy ? " *(2014)*" : " *(2024)*";
+}
+
+/**
+ * The one-line note appended to a result when the caller asked to filter/tag
+ * by edition but the shared game config was unreachable, so isLegacyBySource
+ * couldn't resolve anything for this call — every row would otherwise carry
+ * an unexplained "[edition unknown]" tag with no stated cause.
+ */
+function configUnavailableNote(config: GameConfig | undefined, edition: Edition | undefined): string {
+  return config === undefined && edition !== undefined
+    ? "\n\n*Edition could not be determined — D&D Beyond's config endpoint was unreachable, so edition filtering was not applied.*"
+    : "";
 }
 
 /**
@@ -682,10 +769,10 @@ export async function searchMonsters(
     const typeName = typeMap.get(m.typeId) ?? "Unknown";
     const sizeName = SIZE_MAP[m.sizeId] ?? "Unknown";
     const homebrewTag = m.isHomebrew ? " [Homebrew]" : "";
-    const editionTag =
-      params.edition && Boolean(m.isLegacy) !== (params.edition === "2014")
-        ? m.isLegacy ? " [2014]" : " [2024]"
-        : "";
+    // D3: was a hand-rolled ternary that (unlike every other search tool)
+    // omitted the no-edition "*(Legacy)*" tag entirely, so two same-name
+    // monsters rendered indistinguishably when no edition was requested.
+    const editionTag = editionSuffix(m.isLegacy, params.edition);
     lines.push(
       `- **${m.name}**${homebrewTag}${editionTag} — CR ${crStr}, ${sizeName} ${typeName}, AC ${m.armorClass}, ${m.averageHitPoints} HP${m.isLegendary ? " ★" : ""}`
     );
@@ -746,7 +833,7 @@ export async function getMonster(
   const alignment = alignMap.get(m.alignmentId) ?? "Unaligned";
 
   const lines: string[] = [];
-  lines.push(`# ${m.name}`);
+  lines.push(`# ${m.name}${editionHeaderLabel(m.isLegacy)}`);
   lines.push(`*${sizeName} ${typeName}, ${alignment}*\n`);
 
   lines.push(`**Armor Class** ${m.armorClass}${m.armorClassDescription ? " " + m.armorClassDescription.trim() : ""}`);
@@ -898,7 +985,23 @@ interface DdbItem {
   sources: Array<{ sourceId: number }>;
   canAttune: boolean;
   magic: boolean;
-  isLegacy: boolean;
+  // Unconfirmed whether the live payload actually carries this field (see A1
+  // in the PR #12 review-response plan) — optional so a missing flag doesn't
+  // silently type-check as `false` (misclassifying every item as 2024).
+  isLegacy?: boolean;
+}
+
+/**
+ * Resolves an item's edition status: prefer D&D Beyond's native `isLegacy`
+ * flag when the payload provides one, otherwise derive it from the item's
+ * source book the same way classes/backgrounds/feats do (isLegacyBySource) —
+ * belt-and-braces, since it's unconfirmed whether `isLegacy` is reliably
+ * present on the live items payload. Only ever *fills in* a missing flag;
+ * never overrides a native `true`/`false`, which is authoritative where
+ * present (as it is for races and monsters).
+ */
+function withItemLegacyFlag(config: GameConfig | undefined, items: DdbItem[]): (DdbItem & { isLegacy: boolean | undefined })[] {
+  return items.map((item) => ({ ...item, isLegacy: item.isLegacy ?? isLegacyBySource(config, item.sources) }));
 }
 
 /**
@@ -909,13 +1012,18 @@ export async function searchItems(
   params: ItemSearchParams
 ): Promise<ToolResult> {
   const cacheKey = campaignCacheKey("game-data:items", params.campaignId);
-  const items = await client.get<DdbItem[]>(
+  const itemsRaw = await client.get<DdbItem[]>(
     ENDPOINTS.gameData.items(params.campaignId),
     cacheKey,
     86_400_000,
   );
 
-  let matched = items ?? [];
+  // Fetch config unconditionally (not just for the source-name filter below)
+  // since it also feeds the isLegacy derivation fallback — safely, so a
+  // config outage degrades to "edition unknown" rather than failing the
+  // whole search.
+  const configForEdition = await getGameConfigSafe(client);
+  let matched = withItemLegacyFlag(configForEdition, itemsRaw ?? []);
 
   if (params.name) {
     const searchName = params.name.toLowerCase();
@@ -954,9 +1062,13 @@ export async function searchItems(
   const page = Math.max(1, params.page ?? 1);
   matched = matched.slice((page - 1) * 30, (page - 1) * 30 + 30);
 
+  const configNote = matched.some((i) => i.isLegacy === undefined)
+    ? configUnavailableNote(configForEdition, params.edition)
+    : "";
+
   if (matched.length === 0) {
     return {
-      content: [{ type: "text", text: "No items found matching the search criteria." }],
+      content: [{ type: "text", text: `No items found matching the search criteria.${configNote}` }],
     };
   }
 
@@ -965,12 +1077,12 @@ export async function searchItems(
   const lines = [`# Item Search Results (${header})\n`];
   for (const item of matched) {
     const attune = item.requiresAttunement ? " (attunement)" : "";
-    const editionTag = editionSuffix(Boolean(item.isLegacy), params.edition);
+    const editionTag = editionSuffix(item.isLegacy, params.edition);
     lines.push(`- **${item.name}**${editionTag} — ${item.rarity || "Common"} ${item.filterType || item.type || ""}${attune} [#${item.id}]`);
   }
 
   return {
-    content: [{ type: "text", text: lines.join("\n") }],
+    content: [{ type: "text", text: lines.join("\n") + configNote }],
   };
 }
 
@@ -982,19 +1094,21 @@ export async function getItem(
   params: { itemName: string; edition?: Edition; campaignId?: number }
 ): Promise<ToolResult> {
   const cacheKey = campaignCacheKey("game-data:items", params.campaignId);
-  const items = await client.get<DdbItem[]>(
+  const itemsRaw = await client.get<DdbItem[]>(
     ENDPOINTS.gameData.items(params.campaignId),
     cacheKey,
     86_400_000,
   );
+  const configForEdition = await getGameConfigSafe(client);
+  const items = withItemLegacyFlag(configForEdition, itemsRaw ?? []);
 
   const searchName = params.itemName.toLowerCase();
 
   // Gather all name matches (exact first, else substring) so we can pick the
   // edition-correct variant instead of just taking the first hit.
-  let candidates = (items ?? []).filter((i) => i.name.toLowerCase() === searchName);
+  let candidates = items.filter((i) => i.name.toLowerCase() === searchName);
   if (candidates.length === 0) {
-    candidates = (items ?? []).filter((i) => i.name.toLowerCase().includes(searchName));
+    candidates = items.filter((i) => i.name.toLowerCase().includes(searchName));
   }
 
   if (candidates.length === 0) {
@@ -1006,7 +1120,8 @@ export async function getItem(
   const item = pickByEdition(candidates, params.edition);
 
   const lines: string[] = [];
-  lines.push(`# ${item.name}`);
+  const editionLabel = editionHeaderLabel(item.isLegacy);
+  lines.push(`# ${item.name}${editionLabel}`);
   lines.push(`*${item.filterType || item.type || "Item"}, ${item.rarity || "common"}*\n`);
 
   if (item.requiresAttunement) {
@@ -1024,15 +1139,34 @@ export async function getItem(
   lines.push("");
   lines.push(stripHtml(item.description || item.snippet || "No description available."));
 
+  const configNote = item.isLegacy === undefined ? configUnavailableNote(configForEdition, params.edition) : "";
   return {
-    content: [{ type: "text", text: lines.join("\n") }],
+    content: [{ type: "text", text: lines.join("\n") + configNote }],
   };
 }
 
-/** List the account's source books (id + name) as JSON, for client-side pickers. */
-export async function listSources(client: DdbClient): Promise<ToolResult> {
+/**
+ * List the account's source books (id + name) as JSON, for client-side pickers.
+ *
+ * `nameFilter` narrows the list to sources whose name contains the given text
+ * (case-insensitive) — without it, the full list runs to ~53k characters on a
+ * typical account (LOW finding from the 2026-09-01 edition-awareness test
+ * suite: callers that only needed to check ownership of one or two books were
+ * paying that full cost every time).
+ */
+export async function listSources(client: DdbClient, nameFilter?: string): Promise<ToolResult> {
   const config = await getGameConfig(client);
-  return { content: [{ type: "text", text: JSON.stringify(config.sources ?? []) }] };
+  let sources = config.sources ?? [];
+  if (nameFilter) {
+    const q = nameFilter.toLowerCase();
+    // Check both `name` (D&D Beyond's short code, e.g. "TCoE") and
+    // `description` (the full title, e.g. "Tasha's Cauldron of Everything") —
+    // see resolveSourceId's identical reasoning.
+    sources = sources.filter(
+      (s) => s.name.toLowerCase().includes(q) || s.description?.toLowerCase().includes(q)
+    );
+  }
+  return { content: [{ type: "text", text: JSON.stringify(sources) }] };
 }
 
 // --- Feat types ---
@@ -1097,9 +1231,11 @@ export async function searchFeats(
 
   matched.sort((a, b) => a.name.localeCompare(b.name));
 
+  const configNote = configUnavailableNote(config, params.edition);
+
   if (matched.length === 0) {
     return {
-      content: [{ type: "text", text: "No feats found matching the search criteria." }],
+      content: [{ type: "text", text: `No feats found matching the search criteria.${configNote}` }],
     };
   }
 
@@ -1114,7 +1250,7 @@ export async function searchFeats(
   }
 
   return {
-    content: [{ type: "text", text: lines.join("\n") }],
+    content: [{ type: "text", text: lines.join("\n") + configNote }],
   };
 }
 
@@ -1150,7 +1286,7 @@ export async function getFeat(
   const feat = pickByEdition(candidates, params.edition);
 
   const lines: string[] = [];
-  const editionLabel = feat.isLegacy ? " *(2014)*" : " *(2024)*";
+  const editionLabel = editionHeaderLabel(feat.isLegacy);
   lines.push(`# ${feat.name}${editionLabel}`);
 
   const prereqText = featPrerequisiteText(feat);
@@ -1163,7 +1299,7 @@ export async function getFeat(
   lines.push(stripHtml(feat.description || feat.snippet || "No description available."));
 
   return {
-    content: [{ type: "text", text: lines.join("\n") }],
+    content: [{ type: "text", text: lines.join("\n") + configUnavailableNote(config, params.edition) }],
   };
 }
 
@@ -1421,7 +1557,13 @@ export async function getCondition(
   _client: DdbClient,
   params: { conditionName: string; edition?: "2014" | "2024" }
 ): Promise<ToolResult> {
-  const set = params.edition === "2024" ? CONDITIONS_2024 : CONDITIONS;
+  // D2b: defaults to 2024, matching every other edition-aware tool's default
+  // (see the shared editionParam description) — was 2014 through v0.6.0, a
+  // deliberate but inconsistent choice that became a cross-tool trap once
+  // every other compendium entity defaulted to current. Approved as a
+  // breaking change 2026-08-28 (see the PR #12 review-response plan, D2b).
+  const isLegacy = params.edition === "2014";
+  const set = isLegacy ? CONDITIONS : CONDITIONS_2024;
   const searchName = params.conditionName.toLowerCase().trim();
   const condition = set[searchName];
 
@@ -1431,7 +1573,7 @@ export async function getCondition(
       (c) => c.name.toLowerCase().includes(searchName)
     );
     if (match) {
-      return formatConditionDetails(match);
+      return formatConditionDetails(match, isLegacy);
     }
 
     const available = Object.values(set).map((c) => c.name).join(", ");
@@ -1442,12 +1584,18 @@ export async function getCondition(
     };
   }
 
-  return formatConditionDetails(condition);
+  return formatConditionDetails(condition, isLegacy);
 }
 
-function formatConditionDetails(condition: { name: string; description: string; effects: string[] }): ToolResult {
+// D2a: label which edition's rules text this is — conditions aren't
+// API-backed (a hardcoded table, not collapseByEdition/pickByEdition), so
+// this mirrors the five get_* detail headers' *(2014)*/*(2024)* convention
+// by hand rather than sharing editionHeaderLabel, which expects a tri-state
+// (boolean | undefined) that doesn't apply here: the table selection above
+// is always a definite choice, never "undetermined".
+function formatConditionDetails(condition: { name: string; description: string; effects: string[] }, isLegacy: boolean): ToolResult {
   const lines: string[] = [];
-  lines.push(`# ${condition.name}`);
+  lines.push(`# ${condition.name} *(${isLegacy ? "2014" : "2024"})*`);
   lines.push("");
   lines.push(condition.description);
 
@@ -1508,9 +1656,11 @@ export async function searchClasses(
 
   matched.sort((a, b) => a.name.localeCompare(b.name));
 
+  const configNote = configUnavailableNote(config, params.edition);
+
   if (matched.length === 0) {
     return {
-      content: [{ type: "text", text: "No classes found matching the search criteria." }],
+      content: [{ type: "text", text: `No classes found matching the search criteria.${configNote}` }],
     };
   }
 
@@ -1528,7 +1678,7 @@ export async function searchClasses(
   }
 
   return {
-    content: [{ type: "text", text: lines.join("\n") }],
+    content: [{ type: "text", text: lines.join("\n") + configNote }],
   };
 }
 
@@ -1566,7 +1716,7 @@ export async function getClass(
   const cls = pickByEdition(candidates, params.edition);
 
   const lines: string[] = [];
-  const editionLabel = cls.isLegacy ? " *(2014)*" : " *(2024)*";
+  const editionLabel = editionHeaderLabel(cls.isLegacy);
   lines.push(`# ${cls.name}${editionLabel}`);
 
   const hitDie = cls.hitDice ? `d${cls.hitDice}` : "?";
@@ -1597,7 +1747,7 @@ export async function getClass(
   }
 
   return {
-    content: [{ type: "text", text: lines.join("\n") }],
+    content: [{ type: "text", text: lines.join("\n") + configUnavailableNote(config, params.edition) }],
   };
 }
 
@@ -1650,6 +1800,18 @@ async function loadSubclasses(client: DdbClient, baseClassId: number, campaignId
   );
 }
 
+/** Result of isolating a subclass's own features from its merged base+subclass
+ * list. `baseUnavailable` is set when the base class's own feature list came
+ * back empty/missing while the subclass has features to diff against it — in
+ * that case `features` is deliberately the full (unfiltered) merged list, not
+ * `[]`, so callers can tell "nothing to exclude" apart from "couldn't exclude
+ * anything" and choose to suppress/flag rather than silently show a wrong
+ * answer. */
+interface SubclassOnlyFeaturesResult {
+  features: DdbSubclassFeature[];
+  baseUnavailable: boolean;
+}
+
 /**
  * Isolates a subclass's own features from the merged base+subclass list its
  * `classFeatures` array actually carries, by excluding any feature whose ID
@@ -1657,14 +1819,25 @@ async function loadSubclasses(client: DdbClient, baseClassId: number, campaignId
  * some section/tier flag) is deliberate: nothing in the payload reliably
  * marks a feature as subclass-only, but IDs are stable and the base class's
  * own feature list is already available from getClass/loadSubclasses' caller.
+ *
+ * Guards against the base class's `classFeatures` coming back empty or
+ * missing (unowned source, campaign-narrowed response): with no base IDs to
+ * exclude, a naive diff would return the subclass's *entire* merged list —
+ * the whole base-class chassis misattributed as subclass-only. See
+ * baseUnavailable above.
  */
-function subclassOnlyFeatures(subclass: DdbSubclass, baseClass: DdbClass): DdbSubclassFeature[] {
-  const baseIds = new Set((baseClass.classFeatures ?? []).map((f) => f.id));
-  return (subclass.classFeatures ?? []).filter((f) => !baseIds.has(f.id));
+function subclassOnlyFeatures(subclass: DdbSubclass, baseClass: DdbClass): SubclassOnlyFeaturesResult {
+  const subclassFeatures = subclass.classFeatures ?? [];
+  const baseFeatures = baseClass.classFeatures ?? [];
+  if (baseFeatures.length === 0 && subclassFeatures.length > 0) {
+    return { features: subclassFeatures, baseUnavailable: true };
+  }
+  const baseIds = new Set(baseFeatures.map((f) => f.id));
+  return { features: subclassFeatures.filter((f) => !baseIds.has(f.id)), baseUnavailable: false };
 }
 
 /** A base class annotated with its computed isLegacy flag (see withLegacyFlag). */
-type AnnotatedClass = DdbClass & { isLegacy: boolean };
+type AnnotatedClass = DdbClass & { isLegacy: boolean | undefined };
 
 /**
  * Resolves candidate base classes for a subclass lookup: by name (respecting
@@ -1702,31 +1875,62 @@ interface SubclassMatch {
 }
 
 /**
+ * Separates fulfilled values from rejected results out of a
+ * `Promise.allSettled` batch and counts the rejections, so callers can
+ * surface "N of M requests failed" instead of a bare `continue` silently
+ * dropping them (as this file's three per-class fan-outs used to). Shared by
+ * findSubclassMatches, searchSubclasses, and loadAllClassFeatures so all
+ * three report incompleteness the same way.
+ */
+function settleAll<T>(results: PromiseSettledResult<T>[]): { values: T[]; failureCount: number; total: number } {
+  const values: T[] = [];
+  let failureCount = 0;
+  for (const r of results) {
+    if (r.status === "fulfilled") values.push(r.value);
+    else failureCount++;
+  }
+  return { values, failureCount, total: results.length };
+}
+
+interface SubclassMatchesResult {
+  matches: SubclassMatch[];
+  failureCount: number;
+  total: number;
+}
+
+/**
  * Searches every candidate base class's subclass list for a name match.
  * Exact matches (across all candidate classes) win over partial matches.
  * A class with no subclass content reachable for this account/edition (e.g.
- * legacy content from an unowned sourcebook) is skipped rather than failing
- * the whole search.
+ * legacy content from an unowned sourcebook) resolves as an empty list, not
+ * a rejection, and doesn't affect failureCount. A class whose *request*
+ * fails (auth expiry, transient error, circuit breaker) is counted via
+ * settleAll rather than silently skipped — callers get failureCount/total so
+ * they can distinguish "genuinely not found" from "some classes couldn't be
+ * checked". Throws only when every candidate class's request failed.
  */
 async function findSubclassMatches(
   client: DdbClient,
   candidateClasses: AnnotatedClass[],
   subclassSearchName: string,
   campaignId?: number,
-): Promise<SubclassMatch[]> {
+): Promise<SubclassMatchesResult> {
   const searchName = subclassSearchName.toLowerCase();
-  const perClass = await Promise.allSettled(
+  const settled = await Promise.allSettled(
     candidateClasses.map(async (baseClass) => ({
       baseClass,
       subclasses: await loadSubclasses(client, baseClass.id, campaignId),
     }))
   );
+  const { values, failureCount, total } = settleAll(settled);
+
+  if (failureCount === total && total > 0) {
+    throw new Error("Failed to load subclasses: all requests failed. Check your authentication or try again later.");
+  }
 
   const exact: SubclassMatch[] = [];
   const partial: SubclassMatch[] = [];
-  for (const result of perClass) {
-    if (result.status !== "fulfilled") continue;
-    const { baseClass, subclasses } = result.value;
+  for (const { baseClass, subclasses } of values) {
     for (const subclass of subclasses ?? []) {
       if (subclass.name.toLowerCase() === searchName) {
         exact.push({ subclass, baseClass });
@@ -1735,7 +1939,7 @@ async function findSubclassMatches(
       }
     }
   }
-  return exact.length > 0 ? exact : partial;
+  return { matches: exact.length > 0 ? exact : partial, failureCount, total };
 }
 
 /**
@@ -1761,17 +1965,25 @@ export async function searchSubclasses(
   }
 
   const searchName = (params.name ?? "").toLowerCase();
-  const perClass = await Promise.allSettled(
+  const settled = await Promise.allSettled(
     candidates.map(async (baseClass) => ({
       baseClass,
       subclasses: await loadSubclasses(client, baseClass.id, params.campaignId),
     }))
   );
+  const { values, failureCount, total: fetchTotal } = settleAll(settled);
+
+  if (failureCount === fetchTotal && fetchTotal > 0) {
+    return {
+      content: [{
+        type: "text",
+        text: "Failed to load subclasses: all requests failed. Check your authentication or try again later.",
+      }],
+    };
+  }
 
   let matches: SubclassMatch[] = [];
-  for (const result of perClass) {
-    if (result.status !== "fulfilled") continue;
-    const { baseClass, subclasses } = result.value;
+  for (const { baseClass, subclasses } of values) {
     for (const subclass of subclasses ?? []) {
       if (!searchName || subclass.name.toLowerCase().includes(searchName)) {
         matches.push({ subclass, baseClass });
@@ -1803,18 +2015,23 @@ export async function searchSubclasses(
     return a.subclass.name.localeCompare(b.subclass.name);
   });
 
+  const failureNote = failureCount > 0
+    ? `\n\n*Note: ${failureCount} of ${fetchTotal} classes could not be loaded; these results may be incomplete.*`
+    : "";
+  const configNote = configUnavailableNote(config, params.edition);
+
   if (matches.length === 0) {
-    return { content: [{ type: "text", text: "No subclasses found matching the search criteria." }] };
+    return { content: [{ type: "text", text: `No subclasses found matching the search criteria.${failureNote}${configNote}` }] };
   }
 
   const lines = [`# Subclass Search Results (${matches.length} found)\n`];
   for (const { subclass, baseClass } of matches) {
-    const editionTag = editionSuffix(Boolean(baseClass.isLegacy), params.edition);
+    const editionTag = editionSuffix(baseClass.isLegacy, params.edition);
     const flavor = subclass.cardDescription || stripHtml(subclass.description || "").substring(0, 100);
     lines.push(`- **${subclass.name}**${editionTag} — ${baseClass.name}${flavor ? ` — ${flavor}` : ""}`);
   }
 
-  return { content: [{ type: "text", text: lines.join("\n") }] };
+  return { content: [{ type: "text", text: lines.join("\n") + failureNote + configNote }] };
 }
 
 /**
@@ -1840,28 +2057,47 @@ export async function getSubclass(
     return { content: [{ type: "text", text: candidates.error }] };
   }
 
-  let matches = await findSubclassMatches(client, candidates, params.subclassName, params.campaignId);
+  let matchResult;
+  try {
+    matchResult = await findSubclassMatches(client, candidates, params.subclassName, params.campaignId);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to load subclasses";
+    return { content: [{ type: "text", text: message }] };
+  }
+
+  let { matches } = matchResult;
+  const { failureCount, total: fetchTotal } = matchResult; // stable across the edition-narrowing reassignment below
 
   if (matches.length === 0) {
     const scope = params.className ? ` under "${params.className}"` : "";
+    const failureNote = failureCount > 0
+      ? ` ${failureCount} of ${fetchTotal} classes could not be checked (request failures) — it may exist there rather than being genuinely absent.`
+      : "";
     return {
       content: [{
         type: "text",
-        text: `Subclass "${params.subclassName}"${scope} not found. It may not exist, or its sourcebook may not be owned/available on this D&D Beyond account.`,
+        text: `Subclass "${params.subclassName}"${scope} not found. It may not exist, or its sourcebook may not be owned/available on this D&D Beyond account.${failureNote}`,
       }],
     };
   }
 
-  // Edition: pick the matching variant among same-name candidates.
-  if (params.edition) {
-    const wantLegacy = params.edition === "2014";
+  // Edition: pick the matching variant among same-name candidates. Always
+  // runs (not just when params.edition is set) so a no-edition call defaults
+  // to DEFAULT_EDITION instead of whichever candidate findSubclassMatches
+  // happened to return first — mirrors pickByEdition's fix for the same
+  // defect in every other get_* detail handler.
+  {
+    const wantLegacy = (params.edition ?? DEFAULT_EDITION) === "2014";
     matches = [matches.find((m) => Boolean(m.baseClass.isLegacy) === wantLegacy) ?? matches[0]];
   }
 
   const { subclass, baseClass } = matches[0];
+  const failureNote = failureCount > 0
+    ? `\n\n*Note: ${failureCount} of ${fetchTotal} classes could not be loaded; other subclasses of the same name may exist there.*`
+    : "";
 
   const lines: string[] = [];
-  const editionLabel = baseClass.isLegacy ? " *(2014)*" : " *(2024)*";
+  const editionLabel = editionHeaderLabel(baseClass.isLegacy);
   lines.push(`# ${subclass.name}${editionLabel}`);
   lines.push(`*${baseClass.name} subclass*`);
 
@@ -1878,10 +2114,18 @@ export async function getSubclass(
     lines.push(stripHtml(description));
   }
 
-  const ownFeatures = subclassOnlyFeatures(subclass, baseClass)
-    .sort((a, b) => (a.requiredLevel ?? 0) - (b.requiredLevel ?? 0));
+  const { features: ownFeaturesRaw, baseUnavailable } = subclassOnlyFeatures(subclass, baseClass);
+  const ownFeatures = [...ownFeaturesRaw].sort((a, b) => (a.requiredLevel ?? 0) - (b.requiredLevel ?? 0));
 
-  if (ownFeatures.length > 0) {
+  if (baseUnavailable) {
+    // Distinct from the genuine-empty case below: here the subclass *does*
+    // have features, but the base class's own feature list came back empty,
+    // so nothing could be safely excluded — showing the merged list would
+    // misattribute the entire base-class chassis to this subclass.
+    lines.push(
+      "\n*Base-class feature list unavailable, so subclass-only features can't be isolated; the source may be unowned or campaign-narrowed. Try passing `campaignId`.*"
+    );
+  } else if (ownFeatures.length > 0) {
     lines.push("\n## Features\n");
     for (const feature of ownFeatures) {
       lines.push(`### Level ${feature.requiredLevel ?? "?"}: ${feature.name}`);
@@ -1893,7 +2137,7 @@ export async function getSubclass(
   }
 
   return {
-    content: [{ type: "text", text: lines.join("\n") }],
+    content: [{ type: "text", text: lines.join("\n") + failureNote + configUnavailableNote(config, params.edition) }],
   };
 }
 
@@ -2001,7 +2245,7 @@ export async function getRace(
   const race = pickByEdition(candidates, params.edition);
 
   const lines: string[] = [];
-  const editionLabel = race.isLegacy ? " *(2014)*" : " *(2024)*";
+  const editionLabel = editionHeaderLabel(race.isLegacy);
   lines.push(`# ${race.name}${editionLabel}`);
   if (race.size) lines.push(`*${race.size}*`);
 
@@ -2068,9 +2312,11 @@ export async function searchBackgrounds(
 
   matched.sort((a, b) => a.name.localeCompare(b.name));
 
+  const configNote = configUnavailableNote(config, params.edition);
+
   if (matched.length === 0) {
     return {
-      content: [{ type: "text", text: "No backgrounds found matching the search criteria." }],
+      content: [{ type: "text", text: `No backgrounds found matching the search criteria.${configNote}` }],
     };
   }
 
@@ -2082,7 +2328,7 @@ export async function searchBackgrounds(
   }
 
   return {
-    content: [{ type: "text", text: lines.join("\n") }],
+    content: [{ type: "text", text: lines.join("\n") + configNote }],
   };
 }
 
@@ -2120,7 +2366,7 @@ export async function getBackground(
   const bg = pickByEdition(candidates, params.edition);
 
   const lines: string[] = [];
-  const editionLabel = bg.isLegacy ? " *(2014)*" : " *(2024)*";
+  const editionLabel = editionHeaderLabel(bg.isLegacy);
   lines.push(`# ${bg.name}${editionLabel}`);
 
   if (bg.primaryAbilities && bg.primaryAbilities.length > 0) {
@@ -2139,7 +2385,7 @@ export async function getBackground(
   lines.push(stripHtml(bg.description || "No description available."));
 
   return {
-    content: [{ type: "text", text: lines.join("\n") }],
+    content: [{ type: "text", text: lines.join("\n") + configUnavailableNote(config, params.edition) }],
   };
 }
 
@@ -2154,7 +2400,21 @@ interface ClassFeatureRow {
   classId: number;
   className: string;
   subclassName?: string;
-  isLegacy: boolean;
+  isLegacy: boolean | undefined;
+}
+
+interface LoadAllClassFeaturesResult {
+  rows: ClassFeatureRow[];
+  failureCount: number;
+  total: number;
+  /** Base classes (by name) whose own feature list came back empty/missing,
+   * so their subclasses' features couldn't be isolated and contributed no
+   * rows at all — see subclassOnlyFeatures' baseUnavailable. */
+  baseUnavailableClasses: string[];
+  /** Whether the shared game config was unreachable this call — needed by
+   * the caller to render configUnavailableNote, since config is fetched
+   * internally here rather than by the caller. */
+  configUnavailable: boolean;
 }
 
 /**
@@ -2163,20 +2423,38 @@ interface ClassFeatureRow {
  * `class-feature/collection` endpoint, which does not exist on the live
  * API — every request to it 404s regardless of query params (confirmed by
  * live probing; see ENDPOINTS.gameData.classFeatureCollection and
- * dndbeyond-mcp-class-feature-handoff.md). Base-class features come from
+ * docs/plans/2026-08-24-subclass-feature-independence-handoff.md). Base-class features come from
  * classes(); subclass-only features come from subclasses() per base class,
  * isolated via subclassOnlyFeatures(). Each underlying request is cached
  * 24h, so repeat searches (and get_subclass/search_subclasses calls that
  * touch the same classes) are cheap after the first cold call.
+ *
+ * `className`/`edition` narrow the subclass fan-out to matching base classes
+ * up front via resolveCandidateClasses, when it can resolve a match — a cold
+ * `className: "Paladin"` search no longer pays the full ~24-class request
+ * cost. `className` here is matched against the *composite* class+subclass
+ * name a ClassFeatureRow renders (e.g. "Paladin (Oath of Glory)"), so a query
+ * like `className: "Glory"` must still see every class's subclasses;
+ * resolveCandidateClasses only matches base-class names, so on a
+ * non-match (`{ error }`) this falls back to scanning every class rather
+ * than erroring out, preserving that composite-name matching behavior.
  */
-async function loadAllClassFeatures(client: DdbClient, campaignId?: number): Promise<ClassFeatureRow[]> {
+async function loadAllClassFeatures(
+  client: DdbClient,
+  campaignId?: number,
+  className?: string,
+  edition?: Edition,
+): Promise<LoadAllClassFeaturesResult> {
   const classesRaw = await client.get<DdbClass[]>(
     ENDPOINTS.gameData.classes(campaignId),
     campaignCacheKey("game-data:classes", campaignId),
     86_400_000,
   );
   const config = await getGameConfigSafe(client);
-  const classes = withLegacyFlag(config, classesRaw ?? []) as AnnotatedClass[];
+  const allClasses = withLegacyFlag(config, classesRaw ?? []) as AnnotatedClass[];
+
+  const resolved = resolveCandidateClasses(allClasses, className, edition);
+  const classes = "error" in resolved ? allClasses : resolved;
 
   const rows: ClassFeatureRow[] = [];
   for (const cls of classes) {
@@ -2192,14 +2470,22 @@ async function loadAllClassFeatures(client: DdbClient, campaignId?: number): Pro
     }
   }
 
-  const subclassResults = await Promise.allSettled(
+  const settled = await Promise.allSettled(
     classes.map(async (cls) => ({ cls, subclasses: await loadSubclasses(client, cls.id, campaignId) }))
   );
-  for (const result of subclassResults) {
-    if (result.status !== "fulfilled") continue;
-    const { cls, subclasses } = result.value;
+  const { values, failureCount, total } = settleAll(settled);
+
+  const baseUnavailableClasses = new Set<string>();
+  for (const { cls, subclasses } of values) {
     for (const sub of subclasses ?? []) {
-      for (const f of subclassOnlyFeatures(sub, cls)) {
+      const { features, baseUnavailable } = subclassOnlyFeatures(sub, cls);
+      if (baseUnavailable) {
+        // Contribute no subclass rows for this class — showing the merged
+        // list would misattribute the whole base-class chassis. See A2.
+        baseUnavailableClasses.add(cls.name);
+        continue;
+      }
+      for (const f of features) {
         rows.push({
           name: f.name,
           description: f.description,
@@ -2213,7 +2499,13 @@ async function loadAllClassFeatures(client: DdbClient, campaignId?: number): Pro
     }
   }
 
-  return rows;
+  return {
+    rows,
+    failureCount,
+    total,
+    baseUnavailableClasses: Array.from(baseUnavailableClasses),
+    configUnavailable: config === undefined,
+  };
 }
 
 /**
@@ -2227,7 +2519,19 @@ export async function searchClassFeatures(
   client: DdbClient,
   params: ClassFeatureSearchParams
 ): Promise<ToolResult> {
-  let matched = await loadAllClassFeatures(client, params.campaignId);
+  const { rows, failureCount, total: classFetchTotal, baseUnavailableClasses, configUnavailable } =
+    await loadAllClassFeatures(client, params.campaignId, params.className, params.edition);
+
+  if (failureCount === classFetchTotal && classFetchTotal > 0) {
+    return {
+      content: [{
+        type: "text",
+        text: "Failed to load class features: all requests failed. Check your authentication or try again later.",
+      }],
+    };
+  }
+
+  let matched = rows;
 
   if (params.name) {
     const searchName = params.name.toLowerCase();
@@ -2270,16 +2574,34 @@ export async function searchClassFeatures(
     return a.name.localeCompare(b.name);
   });
 
-  const total = matched.length;
+  const matchedTotal = matched.length;
   matched = matched.slice(0, 30);
+
+  // One honest completeness statement, not two: fold A3's per-class fetch
+  // failures and A2's base-unavailable classes into a single note.
+  const completeness: string[] = [];
+  if (failureCount > 0) {
+    completeness.push(`${failureCount} of ${classFetchTotal} classes could not be loaded`);
+  }
+  if (baseUnavailableClasses.length > 0) {
+    completeness.push(
+      `${baseUnavailableClasses.length} classes have unavailable base-class features, so subclass-only features could not be isolated for them (${baseUnavailableClasses.join(", ")})`
+    );
+  }
+  const completenessNote = completeness.length > 0
+    ? `\n\n*Note: ${completeness.join("; ")} — these results may be incomplete.*`
+    : "";
+  const configNote = configUnavailable && params.edition
+    ? "\n\n*Edition could not be determined — D&D Beyond's config endpoint was unreachable, so edition filtering was not applied.*"
+    : "";
 
   if (matched.length === 0) {
     return {
-      content: [{ type: "text", text: "No class features found matching the search criteria." }],
+      content: [{ type: "text", text: `No class features found matching the search criteria.${completenessNote}${configNote}` }],
     };
   }
 
-  const lines = [`# Class Feature Search Results (${total > 30 ? `showing 30 of ${total}` : `${total} found`})\n`];
+  const lines = [`# Class Feature Search Results (${matchedTotal > 30 ? `showing 30 of ${matchedTotal}` : `${matchedTotal} found`})\n`];
   for (const feature of matched) {
     const level = feature.requiredLevel || "?";
     const editionTag = editionSuffix(feature.isLegacy, params.edition);
@@ -2290,7 +2612,7 @@ export async function searchClassFeatures(
   }
 
   return {
-    content: [{ type: "text", text: lines.join("\n") }],
+    content: [{ type: "text", text: lines.join("\n") + completenessNote + configNote }],
   };
 }
 
@@ -2349,10 +2671,11 @@ export async function searchRacialTraits(
 
   const total = matched.length;
   matched = matched.slice(0, 30);
+  const configNote = configUnavailableNote(config, params.edition);
 
   if (matched.length === 0) {
     return {
-      content: [{ type: "text", text: "No racial traits found matching the search criteria." }],
+      content: [{ type: "text", text: `No racial traits found matching the search criteria.${configNote}` }],
     };
   }
 
@@ -2367,6 +2690,6 @@ export async function searchRacialTraits(
   }
 
   return {
-    content: [{ type: "text", text: lines.join("\n") }],
+    content: [{ type: "text", text: lines.join("\n") + configNote }],
   };
 }

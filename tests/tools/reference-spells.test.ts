@@ -222,6 +222,41 @@ describe("getSpell", () => {
   });
 });
 
+describe("searchSpells edition selection (D1)", () => {
+  let mc: DdbClient;
+  let legacyOnlySpell: DdbSpell;
+
+  beforeEach(() => {
+    const cw2014 = createMockSpell("Cure Wounds", 1, "Evocation");
+    cw2014.definition.isLegacy = true;
+    const cw2024 = createMockSpell("Cure Wounds", 1, "Evocation");
+    cw2024.definition.isLegacy = false;
+    legacyOnlySpell = createMockSpell("Cure Wounds Legacy Only", 1, "Evocation");
+    legacyOnlySpell.definition.isLegacy = true;
+    mc = {
+      get: vi.fn().mockResolvedValue([cw2014, cw2024, legacyOnlySpell]),
+      getRaw: vi.fn(),
+    } as unknown as DdbClient;
+  });
+
+  it("collapses to the 2024 variant by default when no edition is given (regression guard)", async () => {
+    const result = await searchSpells(mc, { name: "Cure Wounds" });
+    const text = result.content[0].text;
+    expect(text.match(/Cure Wounds\b/g)?.length).toBe(2); // "Cure Wounds" + "Cure Wounds Legacy Only"
+    expect(text.match(/\*\*Cure Wounds\*\*/g)?.length).toBe(1); // the exact-name pair collapses to one row
+  });
+
+  it("returns the legacy variant when edition: 2014 is requested", async () => {
+    const result = await searchSpells(mc, { name: "Cure Wounds", edition: "2014" });
+    expect(result.content[0].text.match(/\*\*Cure Wounds\*\*/g)?.length).toBe(1);
+  });
+
+  it("tags a 2014-only spell [2014] when it has to fall back under the default edition", async () => {
+    const result = await searchSpells(mc, { name: "Legacy Only" });
+    expect(result.content[0].text).toContain("Cure Wounds Legacy Only** [2014]");
+  });
+});
+
 describe("getSpell edition selection", () => {
   let mc: DdbClient;
 
@@ -248,5 +283,15 @@ describe("getSpell edition selection", () => {
     const result = await getSpell(mc, { spellName: "Cure Wounds", edition: "2014" });
     expect(result.content[0].text).toContain("Legacy cure restores 1d8");
     expect(result.content[0].text).not.toContain("Modern cure");
+  });
+
+  // Confirmed HIGH-severity defect via the 2026-09-01 edition-awareness test
+  // suite: with no edition requested, getSpell used to return whichever
+  // candidate came first in the compendium (cw2014, per the mock's array
+  // order above) rather than defaulting to DEFAULT_EDITION (2024).
+  it("defaults to the 2024 variant when no edition is given", async () => {
+    const result = await getSpell(mc, { spellName: "Cure Wounds" });
+    expect(result.content[0].text).toContain("Modern cure restores 2d8");
+    expect(result.content[0].text).not.toContain("Legacy cure");
   });
 });
