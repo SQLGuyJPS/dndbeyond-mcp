@@ -52,6 +52,12 @@ Roughly priority-ordered. This is the current tracking doc — `AUDIT.md` (2026-
   with no name/ownership confirmation. Require a matching character **name** before deleting (or an
   `DDB_MCP_ALLOW_DESTRUCTIVE` opt-in). D&D Beyond has no undo.
 - **`cast_spell` accepts nonsensical levels** — no check that `level >= spell.level` / `<= 9`.
+- **`setAbilityScore` silently no-ops for `type: 1` ("standard array")** — found live 2026-09-06 while
+  probing for `docs/plans/2026-09-05-character-fixes-integration-plan.md`. The endpoint returns
+  `200 "Ability score type successfully updated."` but never writes to `stats[].value`; `type: 3`
+  ("point buy") through the same endpoint/params shape does persist correctly. Distinct from item 3 in
+  that plan (which is about `set`-type *modifiers* being ignored, not the base value write itself for
+  one specific input mode). Not yet triaged for a fix.
 
 ## Low / cleanup
 
@@ -79,6 +85,19 @@ Roughly priority-ordered. This is the current tracking doc — `AUDIT.md` (2026-
 ---
 
 *Strengths noted in the review (for context): clean layered client (cache → rate-limit → breaker →
-retry → fetch), graceful degradation on DDB's decommissioned write APIs, good test discipline, and the
-fork's own thoughtful additions (edition-aware `isLegacy` lookups, real `check_auth` liveness probe,
-shared `character-calculations.ts`).*
+retry → fetch), good test discipline, and the fork's own thoughtful additions (edition-aware `isLegacy`
+lookups, real `check_auth` liveness probe, shared `character-calculations.ts`). The "graceful degradation
+on DDB's decommissioned write APIs" this review praised turned out to be five dead tools with an
+apologetic error message, not a decommissioned API — see `v0.8.0` below.*
+
+## Resolved in v0.8.0
+
+- **The five "decommissioned write API" tools weren't decommissioned — they were on stale endpoint
+  paths/payload shapes.** `update_spell_slots`, `update_death_saves`, `update_currency`,
+  `update_pact_magic`, and `cast_spell`'s slot path are restored and live-verified; see
+  `docs/plans/2026-09-05-character-fixes-integration-plan.md`.
+- **`long_rest`/`short_rest` were a silent false success** — the GET-with-query call returned 200 with
+  plausible text but never persisted the reset. Now POST-with-body, confirmed by independent read-back.
+- **Condition ID 15 was mislabeled Exhaustion; it's actually ID 4** — corrected and live-verified.
+- **`updateHp` 400s if `tempHp` is omitted** (found live while verifying the above) — now always sends
+  `temporaryHitPoints`, defaulting to the character's current value.
