@@ -26,14 +26,19 @@ export interface DdbCharacter {
   actions: Record<string, DdbAction[]>;
   modifiers: Record<string, DdbModifier[]>;
   campaign: { id: number; name: string } | null;
+  // Corrected 2026-09-06 (Phase 0 P6): id 4 is Exhaustion, not id 15 — see
+  // CONDITION_NAMES in src/tools/character.ts.
+  conditions?: Array<{ id: number; level: number | null }>;
   feats: DdbFeat[];
   notes: DdbNotes;
   level?: number;
-  pactMagic?: {
-    level: number;
-    used: number;
-    available: number;
-  } | null;
+  // Two shapes observed live (Phase 0 P5, 2026-09-06): a single object, and an
+  // array of per-level rows with `available` left at 0. Use getPactMagicState()
+  // (src/utils/character-spell-slots.ts) rather than reading this directly.
+  pactMagic?:
+    | { level: number; used: number; available: number }
+    | Array<{ level: number; used: number; available: number }>
+    | null;
   spellSlots?: Array<{
     level: number;
     used: number;
@@ -56,6 +61,10 @@ export interface DdbClass {
   level: number;
   isStartingClass: boolean;
   classFeatures: DdbClassFeature[];
+  // Present on live payloads (confirmed 2026-09-06); needed for the
+  // rest/short POST body's classHitDiceUsed map, keyed by this class's `id`
+  // (the class-mapping ID), not `definition.id`.
+  hitDiceUsed?: number;
 }
 
 export interface DdbBackground {
@@ -160,8 +169,13 @@ export interface DdbTraits {
 export interface DdbLimitedUse {
   maxUses: number;
   numberUsed: number;
-  resetType: number; // 1 = Long Rest, 2 = Short Rest
+  // Corrected 2026-09-06 (Phase 0 P10): 1 = Short Rest, 2 = Long Rest, 3 = Dawn,
+  // 4 = Other. This comment previously had Long Rest and Short Rest swapped;
+  // confirmed live via a Warlock feature whose PHB text is explicitly
+  // long-rest-only and carried resetType 2, not 1. Ported-From: grahamethompson/dndbeyond-mcp
+  resetType: number;
   resetTypeDescription: string;
+  useProficiencyBonus?: boolean;
 }
 
 export interface DdbAction {

@@ -14,6 +14,7 @@ import type {
 import type { DdbCampaign, DdbCampaignCharacter2 } from "../types/api.js";
 import { fuzzyMatch, levenshteinDistance } from "../utils/fuzzy-match.js";
 import { ABILITY_NAMES, ABILITY_SUBTYPE_MAP, calculateAbilityModifier, sumModifierBonuses, computeFinalAbilityScore, computeLevel, calculateMaxHp, calculateCurrentHp, calculateAc } from "../utils/character-calculations.js";
+import { getPactMagicState, buildPactMagicUpdateBody } from "../utils/character-spell-slots.js";
 
 interface GetCharacterParams {
   characterId?: number;
@@ -360,18 +361,28 @@ function formatSpellcasting(char: DdbCharacter): string {
   return dcStrings.join(" | ");
 }
 
+// Fallback names for resetType when the API doesn't send resetTypeDescription.
+// Corrected 2026-09-06 (Phase 0 P10) — see the DdbLimitedUse.resetType comment.
+// Ported-From: grahamethompson/dndbeyond-mcp
+const RESET_TYPE_NAMES: Record<number, string> = {
+  1: "Short Rest", 2: "Long Rest", 3: "Dawn", 4: "Other",
+};
+
 function formatLimitedUseResources(char: DdbCharacter): string {
   const resources: string[] = [];
   const actions = char.actions ?? {};
+  const profBonus = calculateProficiencyBonus(computeLevel(char));
 
   for (const list of Object.values(actions)) {
     if (!Array.isArray(list)) continue;
     for (const action of list) {
       if (action.limitedUse) {
         const used = action.limitedUse.numberUsed;
-        const max = action.limitedUse.maxUses;
-        const remaining = max - used;
-        const reset = action.limitedUse.resetTypeDescription || "unknown";
+        const max = action.limitedUse.useProficiencyBonus
+          ? action.limitedUse.maxUses + profBonus
+          : action.limitedUse.maxUses;
+        const remaining = Math.max(0, max - used);
+        const reset = action.limitedUse.resetTypeDescription || RESET_TYPE_NAMES[action.limitedUse.resetType] || "unknown";
         resources.push(`  ${action.name}: ${remaining}/${max} (${reset})`);
       }
     }
@@ -452,8 +463,11 @@ function formatSpellSlots(char: DdbCharacter): string {
   const lines = char.spellSlots
     .filter(slot => slot.available > 0)
     .map(slot => {
-      const filled = "\u25CF".repeat(slot.available - slot.used);
-      const empty = "\u25CB".repeat(slot.used);
+      // Clamped: a used count beyond available (stale data, a mid-flight write)
+      // must never produce a negative repeat count.
+      const used = Math.min(slot.used, slot.available);
+      const filled = "\u25CF".repeat(slot.available - used);
+      const empty = "\u25CB".repeat(used);
       return `Level ${slot.level}: ${filled}${empty} (${slot.used}/${slot.available} used)`;
     });
 
@@ -461,11 +475,13 @@ function formatSpellSlots(char: DdbCharacter): string {
 
   let result = `\n--- Spell Slots ---\n${lines.join("\n")}`;
 
-  // Add pact magic if available
-  if (char.pactMagic && char.pactMagic.available > 0) {
-    const filled = "\u25CF".repeat(char.pactMagic.available - char.pactMagic.used);
-    const empty = "\u25CB".repeat(char.pactMagic.used);
-    result += `\nPact Magic (Level ${char.pactMagic.level}): ${filled}${empty} (${char.pactMagic.used}/${char.pactMagic.available} used)`;
+  // Add pact magic if available (item 9 \u2014 normalized across both payload shapes)
+  const pactMagic = getPactMagicState(char);
+  if (pactMagic && pactMagic.available > 0) {
+    const used = Math.min(pactMagic.used, pactMagic.available);
+    const filled = "\u25CF".repeat(pactMagic.available - used);
+    const empty = "\u25CB".repeat(used);
+    result += `\nPact Magic (Level ${pactMagic.level}): ${filled}${empty} (${pactMagic.used}/${pactMagic.available} used)`;
   }
 
   return result;
@@ -1143,14 +1159,15 @@ export async function updateHp(
     )
   );
 
-  const putBody: { characterId: number; removedHitPoints: number; temporaryHitPoints?: number } = {
+  // The live endpoint 400s with "Missing required field: temporaryHitPoints" if this
+  // is omitted (found live 2026-09-06 while probing Phase 0 — see the plan's
+  // "Unplanned findings"). Always send it, falling back to the character's current
+  // value when the caller isn't changing it.
+  const putBody = {
     characterId: params.characterId,
     removedHitPoints: newRemovedHp,
+    temporaryHitPoints: params.tempHp ?? character.temporaryHitPoints,
   };
-
-  if (params.tempHp !== undefined) {
-    putBody.temporaryHitPoints = params.tempHp;
-  }
 
   await client.put(
     ENDPOINTS.character.updateHp(),
@@ -1201,11 +1218,17 @@ interface AddConditionParams {
   level?: number | null;
 }
 
+// Corrected 2026-09-06 (Phase 0 P6, docs/plans/2026-09-05-character-fixes-integration-plan.md):
+// this table previously had Exhaustion at 15. Live-tested by applying a condition
+// with a numeric level and reading back whether the level persisted — only one of
+// the 15 conditions is leveled, and it was id 4, not 15. Graham's fork had this
+// right; ours was the alphabetical-guess table that turned out wrong.
+// Ported-From: grahamethompson/dndbeyond-mcp
 const CONDITION_NAMES: Record<number, string> = {
-  1: "Blinded", 2: "Charmed", 3: "Deafened", 4: "Frightened",
-  5: "Grappled", 6: "Incapacitated", 7: "Invisible", 8: "Paralyzed",
-  9: "Petrified", 10: "Poisoned", 11: "Prone", 12: "Restrained",
-  13: "Stunned", 14: "Unconscious", 15: "Exhaustion",
+  1: "Blinded", 2: "Charmed", 3: "Deafened", 4: "Exhaustion",
+  5: "Frightened", 6: "Grappled", 7: "Incapacitated", 8: "Invisible",
+  9: "Paralyzed", 10: "Petrified", 11: "Poisoned", 12: "Prone",
+  13: "Restrained", 14: "Stunned", 15: "Unconscious",
 };
 
 export async function addCondition(
@@ -1254,6 +1277,20 @@ export async function removeCondition(
   return { content: [{ type: "text", text: `Removed ${name} from character ${params.characterId}.` }] };
 }
 
+// Honest 404 reporting, replacing the old blanket "deprecated" apology: if D&D
+// Beyond's contract moves again, name the endpoint that broke rather than
+// re-asserting a specific historical deprecation that may no longer be true.
+function reportEndpointFailure(endpointName: string, characterId: number): ToolResult {
+  return {
+    content: [
+      {
+        type: "text",
+        text: `⚠️  ${endpointName} returned 404. D&D Beyond's API contract may have changed again — please report this.\n\nCharacter ID: ${characterId}\nRead operations still work normally.`,
+      },
+    ],
+  };
+}
+
 interface UpdateSpellSlotsParams {
   characterId: number;
   level: number;
@@ -1287,9 +1324,12 @@ export async function updateSpellSlots(
   }
 
   try {
+    // Restored 2026-09-06 (Phase 0 P7): characterId in the body, level-indexed
+    // field name (`level3`, not `{ level, used }`). Confirmed live.
+    // Ported-From: grahamethompson/dndbeyond-mcp
     await client.put(
-      ENDPOINTS.character.updateSpellSlots(params.characterId),
-      { level: params.level, used: params.used },
+      ENDPOINTS.character.updateSpellSlots(),
+      { characterId: params.characterId, [`level${params.level}`]: params.used },
       [`character:${params.characterId}`]
     );
 
@@ -1303,14 +1343,7 @@ export async function updateSpellSlots(
     };
   } catch (error) {
     if (error instanceof HttpError && error.statusCode === 404) {
-      return {
-        content: [
-          {
-            type: "text",
-            text: `⚠️  Spell slot updates are temporarily unavailable.\n\nD&D Beyond has deprecated the v5 character write API endpoints. This feature cannot be used until D&D Beyond provides replacement endpoints.\n\nCharacter ID: ${params.characterId}\nRead operations still work normally.`,
-          },
-        ],
-      };
+      return reportEndpointFailure("Spell slot update", params.characterId);
     }
     throw error;
   }
@@ -1348,15 +1381,23 @@ export async function updateDeathSaves(
     };
   }
 
-  const body =
-    params.type === "success"
-      ? { successCount: params.count }
-      : { failCount: params.count };
+  // Restored 2026-09-06 (Phase 0 P7): characterId in the body, and — critically —
+  // both counts sent on every write. The old single-field body may have been
+  // silently zeroing whichever count wasn't named; read the current state first
+  // and merge the untouched count in rather than trust the API to preserve it.
+  // Ported-From: grahamethompson/dndbeyond-mcp
+  const character = await client.get<DdbCharacter>(
+    ENDPOINTS.character.get(params.characterId),
+    `character:${params.characterId}`,
+    60_000
+  );
+  const successCount = params.type === "success" ? params.count : (character.deathSaves.successCount ?? 0);
+  const failCount = params.type === "failure" ? params.count : (character.deathSaves.failCount ?? 0);
 
   try {
     await client.put(
-      ENDPOINTS.character.updateDeathSaves(params.characterId),
-      body,
+      ENDPOINTS.character.updateDeathSaves(),
+      { characterId: params.characterId, successCount, failCount },
       [`character:${params.characterId}`]
     );
 
@@ -1370,14 +1411,7 @@ export async function updateDeathSaves(
     };
   } catch (error) {
     if (error instanceof HttpError && error.statusCode === 404) {
-      return {
-        content: [
-          {
-            type: "text",
-            text: `⚠️  Death save updates are temporarily unavailable.\n\nD&D Beyond has deprecated the v5 character write API endpoints. This feature cannot be used until D&D Beyond provides replacement endpoints.\n\nCharacter ID: ${params.characterId}\nRead operations still work normally.`,
-          },
-        ],
-      };
+      return reportEndpointFailure("Death save update", params.characterId);
     }
     throw error;
   }
@@ -1389,6 +1423,14 @@ interface UpdateCurrencyParams {
   amount?: number;
   delta?: number;
 }
+
+const CURRENCY_DENOMINATIONS: Record<UpdateCurrencyParams["currency"], "copper" | "silver" | "electrum" | "gold" | "platinum"> = {
+  cp: "copper",
+  sp: "silver",
+  ep: "electrum",
+  gp: "gold",
+  pp: "platinum",
+};
 
 export async function updateCurrency(
   client: DdbClient,
@@ -1436,9 +1478,13 @@ export async function updateCurrency(
   }
 
   try {
+    // Restored 2026-09-06 (Phase 0 P7): denomination moves into the URL path (as
+    // this fork's existing, already-working setGold tool already does) with body
+    // { characterId, amount } — replaces the dead single-endpoint/field-name shape.
+    // Ported-From: grahamethompson/dndbeyond-mcp
     await client.put(
-      ENDPOINTS.character.updateCurrency(params.characterId),
-      { [params.currency]: finalAmount },
+      ENDPOINTS.character.inventory.setCurrency(CURRENCY_DENOMINATIONS[params.currency]),
+      { characterId: params.characterId, amount: finalAmount },
       [`character:${params.characterId}`]
     );
 
@@ -1447,14 +1493,7 @@ export async function updateCurrency(
     };
   } catch (error) {
     if (error instanceof HttpError && error.statusCode === 404) {
-      return {
-        content: [
-          {
-            type: "text",
-            text: `⚠️  Currency updates are temporarily unavailable.\n\nD&D Beyond has deprecated the v5 character write API endpoints. This feature cannot be used until D&D Beyond provides replacement endpoints.\n\nCharacter ID: ${params.characterId}\nRead operations still work normally.`,
-          },
-        ],
-      };
+      return reportEndpointFailure("Currency update", params.characterId);
     }
     throw error;
   }
@@ -1494,10 +1533,21 @@ export async function updatePactMagic(
     };
   }
 
+  const character = await client.get<DdbCharacter>(
+    ENDPOINTS.character.get(params.characterId),
+    `character:${params.characterId}`,
+    60_000
+  );
+
   try {
+    // Restored 2026-09-06 (Phase 0 P7/P5): characterId in the body, level-indexed
+    // field name targeting whichever slot level the Warlock's pact magic actually
+    // uses (item 9 — getPactMagicState/buildPactMagicUpdateBody normalize both the
+    // object and per-level-row array payload shapes D&D Beyond has returned).
+    // Ported-From: grahamethompson/dndbeyond-mcp
     await client.put(
-      ENDPOINTS.character.updatePactMagic(params.characterId),
-      { used: params.used },
+      ENDPOINTS.character.updatePactMagic(),
+      buildPactMagicUpdateBody(character, params.characterId, params.used),
       [`character:${params.characterId}`]
     );
 
@@ -1511,14 +1561,7 @@ export async function updatePactMagic(
     };
   } catch (error) {
     if (error instanceof HttpError && error.statusCode === 404) {
-      return {
-        content: [
-          {
-            type: "text",
-            text: `⚠️  Pact magic updates are temporarily unavailable.\n\nD&D Beyond has deprecated the v5 character write API endpoints. This feature cannot be used until D&D Beyond provides replacement endpoints.\n\nCharacter ID: ${params.characterId}\nRead operations still work normally.`,
-          },
-        ],
-      };
+      return reportEndpointFailure("Pact magic update", params.characterId);
     }
     throw error;
   }
@@ -1528,12 +1571,15 @@ export async function longRest(
   client: DdbClient,
   params: LongRestParams
 ): Promise<{ content: Array<{ type: "text"; text: string }> }> {
-  // Server-side long rest handles all resets atomically:
-  // HP, spell slots, pact magic, limited-use abilities, hit dice, death saves
-  await client.get<unknown>(
-    ENDPOINTS.character.rest.long(params.characterId),
-    `rest:long:${params.characterId}:${Date.now()}`,
-    0
+  // Restored 2026-09-06 (Phase 0 P9): POST-with-body, not GET-with-query. The old
+  // GET call returned a plausible 200 but never actually persisted the reset — a
+  // silent false success, confirmed live via independent read-back. Server-side
+  // long rest handles all resets atomically: HP, spell slots, pact magic,
+  // limited-use abilities, hit dice, death saves.
+  // Ported-From: grahamethompson/dndbeyond-mcp
+  await client.post<unknown>(
+    ENDPOINTS.character.rest.long(),
+    { characterId: params.characterId, resetMaxHpModifier: true, adjustConditionLevel: false }
   );
   client.invalidateCache(`character:${params.characterId}`);
 
@@ -1551,11 +1597,24 @@ export async function shortRest(
   client: DdbClient,
   params: ShortRestParams
 ): Promise<{ content: Array<{ type: "text"; text: string }> }> {
-  // Server-side short rest handles pact magic, short-rest abilities, hit dice
-  await client.get<unknown>(
-    ENDPOINTS.character.rest.short(params.characterId),
-    `rest:short:${params.characterId}:${Date.now()}`,
-    0
+  // Restored 2026-09-06 (Phase 0 P9): POST-with-body, not GET-with-query — same
+  // false-success finding as longRest. Short rest additionally needs each class's
+  // current hit-dice-used count in the body (classHitDiceUsed, keyed by the
+  // class-mapping id — classes[].id, not definition.id — confirmed live), which a
+  // bodyless GET could never have conveyed correctly for a multiclass character.
+  // Ported-From: grahamethompson/dndbeyond-mcp
+  const character = await client.get<DdbCharacter>(
+    ENDPOINTS.character.get(params.characterId),
+    `character:${params.characterId}`,
+    60_000
+  );
+  const classHitDiceUsed = Object.fromEntries(
+    character.classes.map((cls) => [cls.id, cls.hitDiceUsed ?? 0])
+  );
+
+  await client.post<unknown>(
+    ENDPOINTS.character.rest.short(),
+    { characterId: params.characterId, classHitDiceUsed, resetMaxHpModifier: false }
   );
   client.invalidateCache(`character:${params.characterId}`);
 
@@ -1625,27 +1684,28 @@ export async function castSpell(
       };
     }
 
-    // Determine if warlock using pact magic
+    // Determine if warlock using pact magic (item 9 — normalized across both
+    // payload shapes; see src/utils/character-spell-slots.ts)
     const isWarlock = character.classes.some(cls => cls.definition.name === "Warlock");
-    const hasPactMagic = character.pactMagic && character.pactMagic.available > 0;
+    const pactMagic = getPactMagicState(character);
 
-    if (isWarlock && hasPactMagic && spellLevel <= character.pactMagic!.level) {
+    if (isWarlock && pactMagic && pactMagic.available > 0 && spellLevel <= pactMagic.level) {
       // Use pact magic slot
-      const newUsed = character.pactMagic!.used + 1;
-      if (newUsed > character.pactMagic!.available) {
+      const newUsed = pactMagic.used + 1;
+      if (newUsed > pactMagic.available) {
         return {
-          content: [{ type: "text", text: `No pact magic slots remaining (${character.pactMagic!.used}/${character.pactMagic!.available} used).` }],
+          content: [{ type: "text", text: `No pact magic slots remaining (${pactMagic.used}/${pactMagic.available} used).` }],
         };
       }
       await client.put(
-        ENDPOINTS.character.updatePactMagic(params.characterId),
-        { used: newUsed },
+        ENDPOINTS.character.updatePactMagic(),
+        buildPactMagicUpdateBody(character, params.characterId, newUsed),
         [`character:${params.characterId}`]
       );
       return {
         content: [{
           type: "text",
-          text: `Cast ${spell.definition.name} using pact magic (level ${character.pactMagic!.level}). Pact slots: ${newUsed}/${character.pactMagic!.available} used.`,
+          text: `Cast ${spell.definition.name} using pact magic (level ${pactMagic.level}). Pact slots: ${newUsed}/${pactMagic.available} used.`,
         }],
       };
     }
@@ -1660,8 +1720,8 @@ export async function castSpell(
         };
       }
       await client.put(
-        ENDPOINTS.character.updateSpellSlots(params.characterId),
-        { level: spellLevel, used: newUsed },
+        ENDPOINTS.character.updateSpellSlots(),
+        { characterId: params.characterId, [`level${spellLevel}`]: newUsed },
         [`character:${params.characterId}`]
       );
       return {
@@ -1674,8 +1734,8 @@ export async function castSpell(
 
     // No slot data available — just update the slot count
     await client.put(
-      ENDPOINTS.character.updateSpellSlots(params.characterId),
-      { level: spellLevel, used: 1 },
+      ENDPOINTS.character.updateSpellSlots(),
+      { characterId: params.characterId, [`level${spellLevel}`]: 1 },
       [`character:${params.characterId}`]
     );
     return {
@@ -1686,14 +1746,7 @@ export async function castSpell(
     };
   } catch (error) {
     if (error instanceof HttpError && error.statusCode === 404) {
-      return {
-        content: [
-          {
-            type: "text",
-            text: `⚠️  Spell casting operations are temporarily unavailable.\n\nD&D Beyond has deprecated the v5 character write API endpoints. This feature cannot be used until D&D Beyond provides replacement endpoints.\n\nCharacter ID: ${params.characterId}\nRead operations still work normally.`,
-          },
-        ],
-      };
+      return reportEndpointFailure("Spell casting", params.characterId);
     }
     throw error;
   }

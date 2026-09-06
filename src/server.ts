@@ -197,11 +197,11 @@ export async function startServer(): Promise<void> {
 
   server.tool(
     "add_condition",
-    "Apply a condition to a character. Condition IDs: 1=Blinded, 2=Charmed, 3=Deafened, 4=Frightened, 5=Grappled, 6=Incapacitated, 7=Invisible, 8=Paralyzed, 9=Petrified, 10=Poisoned, 11=Prone, 12=Restrained, 13=Stunned, 14=Unconscious, 15=Exhaustion (use level 1-6)",
+    "Apply a condition to a character. Condition IDs: 1=Blinded, 2=Charmed, 3=Deafened, 4=Exhaustion, 5=Frightened, 6=Grappled, 7=Incapacitated, 8=Invisible, 9=Paralyzed, 10=Petrified, 11=Poisoned, 12=Prone, 13=Restrained, 14=Stunned, 15=Unconscious (use level 1-6)",
     {
       characterId: z.coerce.number().describe("The character ID"),
       conditionId: z.coerce.number().describe("Condition ID (1-15)"),
-      level: z.coerce.number().optional().describe("Exhaustion level (1-6). Only used for Exhaustion (conditionId=15)."),
+      level: z.coerce.number().optional().describe("Exhaustion level (1-6). Only used for Exhaustion (conditionId=4)."),
     },
     async (params) =>
       addCondition(client, {
@@ -213,7 +213,7 @@ export async function startServer(): Promise<void> {
 
   server.tool(
     "remove_condition",
-    "Remove a condition from a character. Condition IDs: 1=Blinded, 2=Charmed, 3=Deafened, 4=Frightened, 5=Grappled, 6=Incapacitated, 7=Invisible, 8=Paralyzed, 9=Petrified, 10=Poisoned, 11=Prone, 12=Restrained, 13=Stunned, 14=Unconscious, 15=Exhaustion",
+    "Remove a condition from a character. Condition IDs: 1=Blinded, 2=Charmed, 3=Deafened, 4=Exhaustion, 5=Frightened, 6=Grappled, 7=Incapacitated, 8=Invisible, 9=Paralyzed, 10=Petrified, 11=Poisoned, 12=Prone, 13=Restrained, 14=Stunned, 15=Unconscious",
     {
       characterId: z.coerce.number().describe("The character ID"),
       conditionId: z.coerce.number().describe("Condition ID (1-15)"),

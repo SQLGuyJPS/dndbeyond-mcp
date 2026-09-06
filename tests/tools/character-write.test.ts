@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { updateHp, updateSpellSlots, updateDeathSaves, updateCurrency, useAbility } from "../../src/tools/character.js";
+import { HttpError } from "../../src/resilience/index.js";
 import type { DdbClient } from "../../src/api/client.js";
 import type { DdbCharacter } from "../../src/types/character.js";
 
@@ -105,7 +106,7 @@ describe("updateHp", () => {
 
     expect(mockClient.put).toHaveBeenCalledWith(
       expect.stringContaining("/character/v5/life/hp/damage-taken"),
-      { characterId: 123, removedHitPoints: 0 },
+      { characterId: 123, removedHitPoints: 0, temporaryHitPoints: 0 },
       ["character:123"]
     );
     expect(result.content[0].text).toContain("Healed Test Character for 10 HP");
@@ -119,7 +120,7 @@ describe("updateHp", () => {
 
     expect(mockClient.put).toHaveBeenCalledWith(
       expect.stringContaining("/character/v5/life/hp/damage-taken"),
-      { characterId: 123, removedHitPoints: 15 },
+      { characterId: 123, removedHitPoints: 15, temporaryHitPoints: 0 },
       ["character:123"]
     );
     expect(result.content[0].text).toContain("Damaged Test Character for 5 HP");
@@ -133,7 +134,7 @@ describe("updateHp", () => {
 
     expect(mockClient.put).toHaveBeenCalledWith(
       expect.anything(),
-      { characterId: 123, removedHitPoints: 45 },
+      { characterId: 123, removedHitPoints: 45, temporaryHitPoints: 0 },
       expect.anything()
     );
   });
@@ -156,8 +157,8 @@ describe("updateSpellSlots", () => {
     });
 
     expect(mockClient.put).toHaveBeenCalledWith(
-      expect.stringContaining("/character/v5/character/123/spell/slots"),
-      { level: 3, used: 2 },
+      expect.stringContaining("/character/v5/spell/slots"),
+      { characterId: 123, level3: 2 },
       ["character:123"]
     );
     expect(result.content[0].text).toContain("Updated level 3 spell slots to 2 used");
@@ -202,11 +203,13 @@ describe("updateDeathSaves", () => {
 
   beforeEach(() => {
     mockClient = {
+      get: vi.fn().mockResolvedValue(mockCharacter),
+      getRaw: vi.fn(),
       put: vi.fn().mockResolvedValue({}),
     } as unknown as DdbClient;
   });
 
-  it("should update success death saves", async () => {
+  it("should update success death saves, preserving the untouched failure count", async () => {
     const result = await updateDeathSaves(mockClient, {
       characterId: 123,
       type: "success",
@@ -214,14 +217,19 @@ describe("updateDeathSaves", () => {
     });
 
     expect(mockClient.put).toHaveBeenCalledWith(
-      expect.stringContaining("/character/v5/character/123/life/death-saves"),
-      { successCount: 2 },
+      expect.stringContaining("/character/v5/life/death-saves"),
+      { characterId: 123, successCount: 2, failCount: 0 },
       ["character:123"]
     );
     expect(result.content[0].text).toContain("Updated death saves: 2 successes");
   });
 
-  it("should update failure death saves", async () => {
+  it("should update failure death saves, preserving the untouched success count", async () => {
+    mockClient.get = vi.fn().mockResolvedValue({
+      ...mockCharacter,
+      deathSaves: { failCount: 1, successCount: 2, isStabilized: false },
+    });
+
     const result = await updateDeathSaves(mockClient, {
       characterId: 123,
       type: "failure",
@@ -229,8 +237,8 @@ describe("updateDeathSaves", () => {
     });
 
     expect(mockClient.put).toHaveBeenCalledWith(
-      expect.stringContaining("/character/v5/character/123/life/death-saves"),
-      { failCount: 1 },
+      expect.stringContaining("/character/v5/life/death-saves"),
+      { characterId: 123, successCount: 2, failCount: 1 },
       ["character:123"]
     );
     expect(result.content[0].text).toContain("Updated death saves: 1 failure");
@@ -287,26 +295,26 @@ describe("updateCurrency", () => {
     });
 
     expect(mockClient.put).toHaveBeenCalledWith(
-      expect.stringContaining("/character/v5/character/123/inventory/currency"),
-      { gp: 150 },
+      expect.stringContaining("/character/v5/inventory/currency/gold"),
+      { characterId: 123, amount: 150 },
       ["character:123"]
     );
     expect(result.content[0].text).toContain("Set GP to 150");
   });
 
-  it("should update all currency types", async () => {
-    const currencies = ["cp", "sp", "ep", "gp", "pp"] as const;
+  it("should update all currency types, routing each to its own denomination path", async () => {
+    const denominations = { cp: "copper", sp: "silver", ep: "electrum", gp: "gold", pp: "platinum" } as const;
 
-    for (const currency of currencies) {
+    for (const [currency, denomination] of Object.entries(denominations)) {
       await updateCurrency(mockClient, {
         characterId: 123,
-        currency,
+        currency: currency as keyof typeof denominations,
         amount: 10,
       });
 
       expect(mockClient.put).toHaveBeenCalledWith(
-        expect.anything(),
-        { [currency]: 10 },
+        expect.stringContaining(`/character/v5/inventory/currency/${denomination}`),
+        { characterId: 123, amount: 10 },
         ["character:123"]
       );
     }
@@ -321,6 +329,35 @@ describe("updateCurrency", () => {
 
     expect(mockClient.put).not.toHaveBeenCalled();
     expect(result.content[0].text).toContain("Currency must be one of: cp, sp, ep, gp, pp");
+  });
+});
+
+describe("write endpoint 404 handling", () => {
+  it("updateSpellSlots names the endpoint instead of the old blanket deprecation message", async () => {
+    const mockClient = { put: vi.fn().mockRejectedValue(new HttpError("not found", 404)) } as unknown as DdbClient;
+    const result = await updateSpellSlots(mockClient, { characterId: 123, level: 1, used: 1 });
+    expect(result.content[0].text).toContain("Spell slot update");
+    expect(result.content[0].text).toContain("404");
+    expect(result.content[0].text).not.toContain("D&D Beyond has deprecated");
+  });
+
+  it("updateDeathSaves names the endpoint instead of the old blanket deprecation message", async () => {
+    const mockClient = {
+      get: vi.fn().mockResolvedValue(mockCharacter),
+      put: vi.fn().mockRejectedValue(new HttpError("not found", 404)),
+    } as unknown as DdbClient;
+    const result = await updateDeathSaves(mockClient, { characterId: 123, type: "success", count: 1 });
+    expect(result.content[0].text).toContain("Death save update");
+    expect(result.content[0].text).toContain("404");
+    expect(result.content[0].text).not.toContain("D&D Beyond has deprecated");
+  });
+
+  it("updateCurrency names the endpoint instead of the old blanket deprecation message", async () => {
+    const mockClient = { put: vi.fn().mockRejectedValue(new HttpError("not found", 404)) } as unknown as DdbClient;
+    const result = await updateCurrency(mockClient, { characterId: 123, currency: "gp", amount: 1 });
+    expect(result.content[0].text).toContain("Currency update");
+    expect(result.content[0].text).toContain("404");
+    expect(result.content[0].text).not.toContain("D&D Beyond has deprecated");
   });
 });
 
@@ -403,15 +440,16 @@ describe("updateHp with temporary HP", () => {
     expect(result.content[0].text).toContain("(10 temp HP)");
   });
 
-  it("should not include temporaryHitPoints when tempHp is undefined", async () => {
+  it("should default temporaryHitPoints to the character's current value when tempHp is undefined", async () => {
     await updateHp(mockClient, {
       characterId: 123,
       hpChange: 5,
     });
 
+    // The live endpoint 400s without this field (Phase 0 finding) — always send it.
     expect(mockClient.put).toHaveBeenCalledWith(
       expect.stringContaining("/character/v5/life/hp/damage-taken"),
-      { characterId: 123, removedHitPoints: 5 },
+      { characterId: 123, removedHitPoints: 5, temporaryHitPoints: mockCharacter.temporaryHitPoints },
       ["character:123"]
     );
   });

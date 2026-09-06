@@ -13,7 +13,10 @@ import { CircuitBreaker, RateLimiter } from "../../src/resilience/index.js";
 import { DdbClient } from "../../src/api/client.js";
 import { isAuthenticated } from "../../src/api/auth.js";
 import { ENDPOINTS } from "../../src/api/endpoints.js";
+import { MCPTEST_PREFIX, assertIsTestCharacter } from "../../src/utils/test-fixtures.js";
 import type { DdbCampaign } from "../../src/types/api.js";
+
+export { MCPTEST_PREFIX, assertIsTestCharacter };
 
 let sharedClient: DdbClient | null = null;
 let resolvedCharacterId: number | null = null;
@@ -101,6 +104,29 @@ export async function createTestCharacter(client: DdbClient): Promise<number> {
     { showHelpText: false }
   );
   return characterId;
+}
+
+/**
+ * Creates a fresh throwaway character for write-path tests, named with the
+ * MCPTEST- prefix, and returns the client + its ID. Unlike setupLiveCharacter()
+ * (which may resolve to any real character in any campaign), this always builds
+ * a brand-new character so write tests can never land on real player data.
+ * Caller is responsible for deleting it (deleteTestCharacter) in afterAll.
+ */
+export async function setupWriteTestCharacter(namePart: string): Promise<{
+  client: DdbClient;
+  testCharacterId: number;
+}> {
+  const client = await getLiveClient();
+  const characterId = await createTestCharacter(client);
+  const name = `${MCPTEST_PREFIX}${namePart}`;
+  await client.put(
+    ENDPOINTS.character.updateName(),
+    { characterId, name },
+    [`character:${characterId}`]
+  );
+  assertIsTestCharacter(name);
+  return { client, testCharacterId: characterId };
 }
 
 /**

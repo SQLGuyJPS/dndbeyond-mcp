@@ -12,14 +12,21 @@ export const ENDPOINTS = {
     setInspiration: () => `${DDB_CHARACTER_SERVICE}/character/v5/character/inspiration`,
     condition: () => `${DDB_CHARACTER_SERVICE}/character/v5/condition`,
     rest: {
-      short: (characterId: number) => `${DDB_CHARACTER_SERVICE}/character/v5/character/rest/short?characterId=${characterId}`,
-      long: (characterId: number) => `${DDB_CHARACTER_SERVICE}/character/v5/character/rest/long?characterId=${characterId}`,
+      // POST-with-body, not GET-with-query. Confirmed live 2026-09-06 (Phase 0 P9,
+      // docs/plans/2026-09-05-character-fixes-integration-plan.md): the old GET form
+      // returns a 200 with plausible-looking descriptive text but never actually
+      // resets pact magic / hit dice — a silent false success, not a working path.
+      // Ported-From: grahamethompson/dndbeyond-mcp
+      short: () => `${DDB_CHARACTER_SERVICE}/character/v5/character/rest/short`,
+      long: () => `${DDB_CHARACTER_SERVICE}/character/v5/character/rest/long`,
     },
-    // Deprecated v5 endpoints (return 404, kept for reference)
-    updateSpellSlots: (id: number) => `${DDB_CHARACTER_SERVICE}/character/v5/character/${id}/spell/slots`,
-    updateDeathSaves: (id: number) => `${DDB_CHARACTER_SERVICE}/character/v5/character/${id}/life/death-saves`,
-    updateCurrency: (id: number) => `${DDB_CHARACTER_SERVICE}/character/v5/character/${id}/inventory/currency`,
-    updatePactMagic: (id: number) => `${DDB_CHARACTER_SERVICE}/character/v5/character/${id}/spell/pact-magic`,
+    // Restored 2026-09-06 (Phase 0 P7). characterId moved out of the path and into
+    // the body, matching the pattern already used by updateHp/updateLimitedUse/
+    // setInspiration/condition. Confirmed live via PUT + independent read-back.
+    // Ported-From: grahamethompson/dndbeyond-mcp
+    updateSpellSlots: () => `${DDB_CHARACTER_SERVICE}/character/v5/spell/slots`,
+    updateDeathSaves: () => `${DDB_CHARACTER_SERVICE}/character/v5/life/death-saves`,
+    updatePactMagic: () => `${DDB_CHARACTER_SERVICE}/character/v5/spell/pact-magic`,
     builder: {
       standardBuild: () => `${DDB_CHARACTER_SERVICE}/character/v5/builder/standard-build`,
       quickBuild: () => `${DDB_CHARACTER_SERVICE}/character/v5/builder/quick-build`,
@@ -45,6 +52,11 @@ export const ENDPOINTS = {
     inventory: {
       addItems: () => `${DDB_CHARACTER_SERVICE}/character/v5/inventory/item`,
       setGold: () => `${DDB_CHARACTER_SERVICE}/character/v5/inventory/currency/gold`,
+      // Generalizes the setGold pattern (already proven live) to all five
+      // denominations. Confirmed live 2026-09-06 for all five (Phase 0 P7).
+      // Ported-From: grahamethompson/dndbeyond-mcp
+      setCurrency: (denomination: "copper" | "silver" | "electrum" | "gold" | "platinum") =>
+        `${DDB_CHARACTER_SERVICE}/character/v5/inventory/currency/${denomination}`,
       setStartingType: () => `${DDB_CHARACTER_SERVICE}/character/v5/inventory/starting-type`,
     },
     delete: () => `${DDB_CHARACTER_SERVICE}/character/v5/character`,
