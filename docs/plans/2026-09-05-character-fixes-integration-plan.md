@@ -753,3 +753,87 @@ were confirmed via an **independent read-back**, per §3.3's Threat C.
   a tool this fork's own docs list as already working (not one of the five dead tools) — the same "always send
   every field the endpoint expects" lesson as the death-saves finding in item 5. **Fixed alongside PR 1** since
   it's a one-line change to a sibling write path already under test in this release; see PR 1's commit.
+
+---
+
+## v0.8.0 completion report (2026-09-06)
+
+All of §2.1's substantive PRs (1–5, items 5, 6, 9, 13, 14) are implemented, tested, and committed on
+`feat/0.8.0-write-path` (branched from `main`). Every write path was verified against the live API, not
+just mocked — the same fixture-and-read-back discipline the plan specifies.
+
+### What shipped
+
+- **PR 1** — `updateSpellSlots`, `updateDeathSaves`, `updateCurrency` restored to graham's confirmed
+  endpoint/payload shapes; the five "temporarily unavailable" canned messages replaced with honest 404
+  reporting (`reportEndpointFailure`); `updateDeathSaves` now reads-then-merges both counts.
+  Additionally fixed the live `updateHp` 400 found during Phase 0 (missing `temporaryHitPoints`).
+- **PR 2** — new `src/utils/character-spell-slots.ts` (`getPactMagicState`, `buildPactMagicUpdateBody`,
+  `warlockSlotLevel`, `warlockSlotCount`); `updatePactMagic`, `castSpell`'s pact path, and
+  `formatSpellSlots` all route through it; `DdbCharacter.pactMagic` widened to the object-or-array union.
+- **PR 3** — `long_rest`/`short_rest` switched to `client.post` with graham's body shapes;
+  `DdbClass.hitDiceUsed` added to the type; `shortRest` now reads the character first to build
+  `classHitDiceUsed` keyed by `classes[].id` (confirmed live to be the mapping ID, not `definition.id`
+  — the plan's own wording was ambiguous on this point).
+- **PR 4** — `CONDITION_NAMES` corrected (Exhaustion → 4) in `character.ts` and both tool descriptions in
+  `server.ts`; `DdbLimitedUse.resetType` comment corrected, `RESET_TYPE_NAMES` fallback table added,
+  `useProficiencyBonus` handling and a `Math.max(0, ...)` clamp added to `formatLimitedUseResources`.
+- **PR 5** — `package.json` and `src/server.ts`'s `McpServer` version both bumped to `0.8.0` (were
+  stale/mismatched at `0.7.0`/`0.1.0`); README gained a v0.8.0 changelog entry, documentation for six
+  previously-undocumented tools, and an Acknowledgments section; `BACKLOG.md` updated (stale
+  "decommissioned write APIs" framing corrected, four items marked resolved, the new `setAbilityScore`
+  finding added).
+- **Test infrastructure**: `tests/live/setup.ts` gained `setupWriteTestCharacter()` /
+  `assertIsTestCharacter()` (backed by new `src/utils/test-fixtures.ts`, shared with the also-new
+  `src/scripts/sweep-test-characters.ts` → `npm run test:live:sweep[:dry-run]`). `write-character.test.ts`
+  was rewritten from scratch: it now builds fresh `MCPTEST-`-prefixed fixtures instead of resolving to
+  whatever real character `setupLiveCharacter()` finds first, and every assertion is against an
+  independent read-back — no test accepts a "temporarily unavailable" response as passing anymore.
+
+### Test results
+
+- **Tier 1 (`npm test`):** 402 passed (was 374 at the start of this session; new coverage: 19 tests for
+  `character-spell-slots.ts`, 6 for the corrected condition/resetType behavior, plus rewrites of the
+  three existing suites the endpoint-shape changes touched). `npm run build` clean.
+- **Tier 2 (`npm run test:live`):** 59 passed, including the 9 rewritten/new write-path tests — every one
+  of them backed by an independent read-back per the plan's Threat C requirement. Ran twice (once
+  standalone, once as part of the full live suite) with identical results. `npm run test:live:sweep`
+  confirms zero orphaned `MCPTEST-` characters after both runs.
+- **Tier 3 (behavioral agent):** **Not run this session** — see Next steps.
+
+### Deviations from the plan (none change 0.8.0/0.9.0/0.10.0 scope)
+
+1. **Commit granularity.** §2.1 specifies one PR per item. This environment's `Bash` tool has no
+   interactive `git add -p`/`git add -i`, so splitting the already-written, heavily interleaved changes
+   to `character.ts`/`endpoints.ts`/`types/character.ts` into four true partial-file commits wasn't
+   practical after the fact. Landed as two commits instead: one covering PRs 1–4's substantive code
+   (still organized internally by item, with `Ported-From` attribution and per-item code comments citing
+   the relevant Phase 0 probe), and one for PR 5's release chore. Each item remains independently
+   reviewable by section/comment even though `git bisect` would land on "all of PRs 1–4" rather than a
+   single item. If true per-item history matters, it can still be reconstructed by hand from this report
+   before opening PRs against upstream.
+2. **Item 7 stays in v0.10.0** (Open Question 1, resolved via P8 — see the Phase 0 table). Confirmed
+   cheap to build, but not pulled forward since it isn't a dependency of the write-path work.
+3. **M2 (natural-armor fixture) is cancelled** (P4) — this account owns no Tortle/Lizardfolk/Warforged.
+   Affects v0.9.0 PR 8's test coverage (item 2's natural-armor AC branch ships unit-tested against a
+   synthetic fixture only, not a captured real payload) — flag this explicitly in that PR's description
+   per §3.2's mitigation. M3 (hybrid 2024-background ASI) remains buildable (Half-Elf is owned as legacy).
+4. **`updateHp`'s live 400 bug** (found during Phase 0, not one of the plan's 15 items) was fixed inline
+   in PR 1 rather than deferred, since it's a one-line change to a sibling write path already under test.
+
+### Next steps
+
+1. **Tier 3 behavioral testing (§3.3) has not been run.** `.claude/agents/ddb-character-reader.md` and
+   `ddb-character-writer.md` don't exist yet — they need to be created (reader/writer tool sets per
+   §3.3) before dispatching W1a–W4b against a fresh fixture. Tier 2's independent-read-back coverage is
+   real evidence the write path works, but per the plan's own §3.3 framing tier 2 and tier 3 test
+   different things (contract correctness vs. output legibility for a model at the table) — tier 3 is
+   still open. Recommend doing this before tagging the release, or explicitly accepting tier-2-only
+   coverage as sufficient for this release and noting the deviation in the tag notes.
+2. **Release checklist (§5) status:** 1 ✅, 2 ✅, 3 ✅ (no "deprecation accepted" branches remain), 4 ⬜
+   (tier 3 not run), 5 ✅ (sweep confirms no orphans), 6 ✅, 7 ✅, 8 ✅, 9 ⬜ (no git tag or release notes
+   cut yet — pending user sign-off).
+3. **Decide whether to open this as a real PR** against `origin/main` (or the upstream fork) now, or
+   continue accumulating v0.9.0 work on top of `feat/0.8.0-write-path` first. Nothing has been pushed.
+4. Once 0.8.0 is signed off, v0.9.0 (items 1, 3, 2, 4, 10, 12, 8 — PRs 6–13) can start; §1's dependency
+   graph says land item 3 (`computeCharacterAbilityScore`) first since items 2 and 4 both build on it.
