@@ -719,18 +719,37 @@ duplicating a real feature.
 
 ## Phase 0 results
 
-*(To be appended by the probe session before any 0.8.0 implementation begins. One row per probe, verbatim
-observation, and an explicit note for any finding that amends this plan.)*
+Run 2026-09-06 against a live `MCPTEST-F2-Warlock` fixture (character ID `170754982`, Warlock 2024,
+levels 3→5) built via the running MCP server's own tools, plus a standalone probe script (not committed)
+that reused `~/.dndbeyond-mcp/config.json` to hit endpoints the tools don't cover yet. All write findings
+were confirmed via an **independent read-back**, per §3.3's Threat C.
 
 | Probe | Question | Observed | Consequence |
 |---|---|---|---|
-| P1 | | | |
-| P2 | | | |
-| P3 | | | |
-| P4 | | | |
-| P5 | | | |
-| P6 | | | |
-| P7 | | | |
-| P8 | | | |
-| P9 | | | |
-| P10 | | | |
+| P1 | Does `set_class_level` work past level 1? | Yes. `set_class_level` moved the fixture's Warlock from level 3 to level 5 cleanly (`classId: 2190885`, `classMappingId` read from `classes[].id`). | F2/F3/F4 fixtures can be built past level 1 as planned. |
+| P2 | 2024 class IDs for Warlock, Barbarian, Monk | Live `game-data/classes`: **Warlock 2190885, Barbarian 2190875, Monk 2190880** (2024); legacy equivalents **7, 9, 11** also present. Matches the MCP tool descriptions' own hint text. | Use these IDs for F2 (Warlock), F3 (Barbarian), F4 (Monk) fixture builds. Not hardcoded blind — confirmed live. |
+| P3 | Does `resolve_choices` complete a Warlock, and pick invocations? | Yes. Auto-resolved 20 choices in one call, including two Level-2 Eldritch Invocation picks — both landed on "Agonizing Blast" (first-available, repeatable option chosen twice). `options.class` on the read-back character shows the picks with full definitions. 2 choices remained unresolved (not investigated further — non-blocking). | Confirms item 15's data source and Open Question 3: `resolve_choices` picking the same repeatable option twice is expected "first-available" behavior, not a bug — item 15 tests needing a *specific* invocation still need manual fixture M6. |
+| P4 | Which legacy and natural-armor species does this account own? | `game-data/races` returns 33 races. **Tortle, Lizardfolk, Warforged: none found** — this account owns no natural-armor species. Legacy (`isLegacy:true`) species available: Human, Half-Orc, Tiefling, Dragonborn, Half-Elf, Aarakocra, Goliath, plus several legacy subraces. | **M2 (natural-armor fixture) is cancelled** — item 2's natural-armor branch ships with unit-test-only coverage against a synthetic/hand-built fixture rather than a captured real payload; document this gap in PR 8's description. **M3 remains buildable** — Half-Elf (legacy) + a 2024 background is available for the hybrid-ASI fixture. |
+| P5 | Is `pactMagic` an array or object on this account's Warlock? | **Array** of per-level rows: `[{level:1..5, used, available}]`. `available` was **0 for every row** at both Warlock level 3 and level 5 — the API never populates it. | Confirms item 9 is not optional: without `getPactMagicState`'s Warlock-progression backfill, every pact-magic display and write on this account's Warlock is reading `available: 0` today, which is why `cast_spell`'s pact path could never have worked even if the endpoint weren't 404ing. |
+| P6 | Actual condition ID mapping | Applying `id:4` with a numeric `level` persisted that level; applying `id:15` with a numeric `level` silently dropped it back to `null`. Exhaustion is the only leveled condition among the 15 — this proves **`id:4` is Exhaustion**, not `id:15`. | **Graham's table is correct; this fork's is wrong.** Corrected mapping: `1=Blinded, 2=Charmed, 3=Deafened, 4=Exhaustion, 5=Frightened, 6=Grappled, 7=Incapacitated, 8=Invisible, 9=Paralyzed, 10=Petrified, 11=Poisoned, 12=Prone, 13=Restrained, 14=Stunned, 15=Unconscious`. PR 4 updates `CONDITION_NAMES` and both tool descriptions in `server.ts` to this table. |
+| P7 | Do the four corrected write endpoints accept graham's payload shapes? | All four confirmed live with a **200 + independent read-back**: `PUT spell/slots {characterId, level<N>: used}`; `PUT life/death-saves {characterId, failCount, successCount}`; `PUT spell/pact-magic {characterId, level<N>: used}`; `PUT inventory/currency/{copper\|silver\|electrum\|gold\|platinum} {characterId, amount}` (this last shape was already live and proven — it's this fork's existing working `setGold` tool, generalized to the other four denominations and confirmed live for all of them). | PRs 1 and 2 can proceed exactly as specified. `updateCurrency` becomes a thin wrapper choosing the right denomination path, matching the already-working `setGold` pattern rather than inventing a new one. |
+| P8 | Does `characters/list?userId=` return the expected shape? | Yes: `{characterSlotLimit, canUnlockCharacters, characters: [{id, level, name, status, statusSlug, isAssigned, classDescription, raceName, avatarUrl, backdropUrl, coverImageUrl, characterSecondaryInfo, campaignId, campaignName, createdDate, lastModifiedDate, isReady}]}`. Cheap — no per-character detail fetch needed. `characterSlotLimit` was `null` for this account (unlimited/unenforced). | Confirms item 7's approach and perf win. **Decision on Open Question 1: keep item 7 in v0.10.0.** 0.8.0 is already large and item 7 isn't a dependency of the write-path work; pulling it forward would only share a verification session, which isn't worth mixing a name-resolution change into the write-path release. `test:live:sweep` (§3.2) must treat a `null` `characterSlotLimit` as "don't warn," not zero. |
+| P9 | Does rest work as POST-with-body? Does the current GET still work? | **The current GET-based short rest is a false success in production today.** `GET rest/short?characterId=` returned `200 "Successfully received short rest text"` with descriptive data (`"2 Pact Magic Slots"`) but an independent read-back showed pact magic `used` counts **unchanged** — it never actually reset anything. `POST rest/short` with `{characterId, classHitDiceUsed: {<classMappingId>: n}, resetMaxHpModifier: false}` and `POST rest/long` with `{characterId, resetMaxHpModifier: true, adjustConditionLevel: false}` both worked correctly, confirmed two ways: the response body itself echoes the full updated state (`spellSlots`, `pactMagic`, `classes[].hitDiceUsed`, `removedHitPoints`), and a separate independent read-back matched it. | **This elevates PR 3 from "verify, maybe skip" to confirmed-necessary.** Today's `short_rest`/`long_rest` tools report success and silently do nothing — exactly the Threat C failure mode §3.3 warns about, and it's live in production right now, not hypothetical. PR 3 proceeds as specified; its tier-2 test must assert on the read-back, never the rest call's own response text (though in this case the response text is also trustworthy for POST, unlike GET). |
+| P10 | What `resetType` integers appear against their real-world reset behavior? | Warlock's **Magical Cunning** (PHB text: *"you can't do so again until you finish a Long Rest"*) carries `resetType: 2`. A homebrew feat action ("Algiz: Activate Runestone") carries `resetType: 3`. | Confirms graham's corrected mapping (`1=Short Rest, 2=Long Rest, 3=Dawn, 4=Other`); this fork's stale type comment (`1=Long Rest, 2=Short Rest`) is backwards — a long-rest-only feature could not carry `resetType: 2` under this fork's own comment. PR 4 fixes the `DdbLimitedUse.resetType` comment and adds the `resetNames` fallback table using the corrected ordering. |
+
+### Unplanned findings (recorded, not in original probe list)
+
+- **`setAbilityScore` with `type: 1` ("standard array") silently no-ops.** The live endpoint returns
+  `200 "Ability score type successfully updated."` but never writes to `stats[].value` — the character keeps
+  `null` ability scores. `type: 3` ("point buy") through the *same* endpoint and params shape does persist the
+  value correctly. This is a real, pre-existing bug distinct from anything in this plan's 15 items (ability
+  score *values* being ignored for one specific input mode, not the `set`-modifier issue item 3 covers). Out of
+  scope for 0.8.0 (ability scores are item 3, v0.9.0) — recorded in `BACKLOG.md` for a future fix, likely
+  alongside PR 7.
+- **`updateHp` 400s when `tempHp` is omitted.** The current code
+  (`src/tools/character.ts` — `updateHp`) only includes `temporaryHitPoints` in the PUT body when
+  `params.tempHp !== undefined`, but the live `life/hp/damage-taken` endpoint requires the field unconditionally
+  and returns `400 "Missing required field: temporaryHitPoints"` without it. This is a currently-shipping bug in
+  a tool this fork's own docs list as already working (not one of the five dead tools) — the same "always send
+  every field the endpoint expects" lesson as the death-saves finding in item 5. **Fixed alongside PR 1** since
+  it's a one-line change to a sibling write path already under test in this release; see PR 1's commit.
