@@ -1844,11 +1844,25 @@ type AnnotatedClass = DdbClass & { isLegacy: boolean | undefined };
  * edition) when `className` is given, else every class matching the
  * requested edition (or every class in both editions, if neither is given).
  * Shared by getSubclass and searchSubclasses so both narrow the same way.
+ *
+ * `exactOnly` suppresses the substring fallback below, returning `{ error }`
+ * on anything short of an exact (case-insensitive) base-class name match.
+ * loadAllClassFeatures passes `true` here: unlike getSubclass/searchSubclasses
+ * — where `className` only ever means "a base class name" — its candidate
+ * list also gates which classes' subclasses get fetched at all, and its own
+ * `className` filter runs later against a *composite* class+subclass name
+ * (e.g. "Cleric (War Domain)"). A substring match here only ever inspects
+ * base-class names, so it can resolve to the wrong class — or the right
+ * class plus a false positive — while silently dropping every other class
+ * whose *subclass* name would have matched the composite filter. See
+ * loadAllClassFeatures for the full explanation and the regression this
+ * guards (search_class_features, PR #12 review, className: "War").
  */
 function resolveCandidateClasses(
   classes: AnnotatedClass[],
   className: string | undefined,
   edition: Edition | undefined,
+  exactOnly = false,
 ): AnnotatedClass[] | { error: string } {
   if (!className) {
     return edition ? classes.filter((c) => Boolean(c.isLegacy) === (edition === "2014")) : classes;
@@ -1856,7 +1870,7 @@ function resolveCandidateClasses(
 
   const searchClass = className.toLowerCase();
   let byName = classes.filter((c) => c.name.toLowerCase() === searchClass);
-  if (byName.length === 0) byName = classes.filter((c) => c.name.toLowerCase().includes(searchClass));
+  if (byName.length === 0 && !exactOnly) byName = classes.filter((c) => c.name.toLowerCase().includes(searchClass));
   if (byName.length === 0) {
     return { error: `Class "${className}" not found.` };
   }
@@ -2430,14 +2444,26 @@ interface LoadAllClassFeaturesResult {
  * touch the same classes) are cheap after the first cold call.
  *
  * `className`/`edition` narrow the subclass fan-out to matching base classes
- * up front via resolveCandidateClasses, when it can resolve a match — a cold
- * `className: "Paladin"` search no longer pays the full ~24-class request
- * cost. `className` here is matched against the *composite* class+subclass
- * name a ClassFeatureRow renders (e.g. "Paladin (Oath of Glory)"), so a query
- * like `className: "Glory"` must still see every class's subclasses;
- * resolveCandidateClasses only matches base-class names, so on a
- * non-match (`{ error }`) this falls back to scanning every class rather
- * than erroring out, preserving that composite-name matching behavior.
+ * up front via resolveCandidateClasses, when it can resolve an *exact*
+ * base-class name match — a cold `className: "Paladin"` search no longer
+ * pays the full ~24-class request cost. `className` here is matched against
+ * the *composite* class+subclass name a ClassFeatureRow renders (e.g.
+ * "Paladin (Oath of Glory)"), so a query like `className: "Glory"` must
+ * still see every class's subclasses; resolveCandidateClasses only matches
+ * base-class names, so on a non-match (`{ error }`) this falls back to
+ * scanning every class rather than erroring out, preserving that
+ * composite-name matching behavior.
+ *
+ * The narrowing call below passes `exactOnly: true` deliberately. A
+ * substring match against *base-class* names only (e.g. `className: "War"`
+ * matching "Warlock") would narrow the fan-out to Warlock alone and never
+ * fetch Cleric's subclasses at all — silently dropping "War Domain" and its
+ * features, which the composite-name filter further down would otherwise
+ * have matched too. Falling back to a full scan on anything short of an
+ * exact match costs the optimization only for partial/ambiguous class-name
+ * queries; callers filtering by class overwhelmingly type the full class
+ * name, so `className: "Paladin"` — the case this narrowing targets — is
+ * unaffected. See the PR #12 review discussion of this regression.
  */
 async function loadAllClassFeatures(
   client: DdbClient,
@@ -2453,7 +2479,7 @@ async function loadAllClassFeatures(
   const config = await getGameConfigSafe(client);
   const allClasses = withLegacyFlag(config, classesRaw ?? []) as AnnotatedClass[];
 
-  const resolved = resolveCandidateClasses(allClasses, className, edition);
+  const resolved = resolveCandidateClasses(allClasses, className, edition, /* exactOnly */ true);
   const classes = "error" in resolved ? allClasses : resolved;
 
   const rows: ClassFeatureRow[] = [];

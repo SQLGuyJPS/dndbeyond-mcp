@@ -113,7 +113,10 @@ without trusting the agent's self-report.
 
 ## 3. Test groups
 
-30 tests, 13 groups. Every expectation below was captured from the live server, not from memory or the web.
+30 tests, 13 groups, run 2026-08-31/09-01 (see §6 for results). A 14th group, G14, was added 2026-09-06 to
+cover a regression B1's own narrowing introduced (caught in PR #12 review) — its live confirmation is still
+pending, so it isn't folded into §6's completed tally. Every expectation below was captured from the live
+server, not from memory or the web.
 
 ### G1 — Subclasses (A2, subclass independence)
 
@@ -299,6 +302,87 @@ across the board. See §7 for the full change list and test coverage.
   Expect an honest not-found, not an invented subclass — and not a not-found message if fetches actually
   failed.
 
+### G14 — `className` substring-narrowing regression (B1 regression, caught in PR #12 review)
+
+> **Status: confirmed live 2026-09-06 (pre-fix), fix built and unit-tested same day, fix confirmed live
+> 2026-09-06 via an isolated `ddb-tester` dispatch onto a rebuilt server (PASS — see result record below).**
+> Unlike G12/finding 1, this is a single mechanical correctness check rather than a test of model judgment —
+> it earns a slot in the live suite (rather than living only in §4 below) because it's independently
+> confirmable against **real account entitlement**, which the unit-test mocks can't speak to.
+
+`resolveCandidateClasses` narrows `search_class_features`'s subclass fan-out by matching `className`
+against *base*-class names only (exact match, falling back to substring). But the tool's own downstream
+filter matches the *composite* class+subclass name it renders (e.g. `"Cleric (War Domain)"`). A `className`
+that substring-matches one base class's name — without exactly naming it — narrows the fan-out to that class
+alone and never fetches any other class's subclasses, silently dropping their subclass-only features even
+though the composite-name filter would have matched them. Reported by dmjohnston89 in PR #12 review
+(comment `5554586705`) with a synthetic Warlock/Cleric fixture; this test reproduces it with real account
+content instead.
+
+This account owns Cleric's **War Domain** (`search_subclasses{className:"Cleric"}` lists it) whose real
+level-3 feature is named **"War Priest"** — a same-shape collision with **Warlock** (whose own name contains
+"war") that exists on this account without needing a mock.
+
+- **G14a** *(directed)* — "Using `search_class_features` with a `className` filter of `'War'` — I want the
+  substring match, not an exact class name — list every result. Then filter further by feature name `'Priest'`
+  on top of that." Expect both Warlock's own features (e.g. Eldritch Invocations) and Cleric's War Domain
+  features (specifically "War Priest") once the fix is live; the `name:"Priest"` follow-up should return
+  exactly "War Priest", not an empty result.
+
+**Pre-fix result, captured 2026-09-06 against the live server** (not a subagent dispatch — a direct tool
+call from the main session, since the fix in this checkout wasn't yet loaded by the connected server; a
+proper isolated `ddb-tester` dispatch is the pending step below):
+- `search_class_features{className:"War"}` → 59 results, **all Warlock**, zero Cleric/War Domain content.
+- `search_class_features{className:"War", name:"Priest"}` → **"No class features found matching the search
+  criteria."** — silently wrong: the feature exists and this account owns it.
+
+**Fix applied 2026-09-06** (matches dmjohnston89's suggestion): `resolveCandidateClasses` gained an
+`exactOnly` flag; `loadAllClassFeatures` passes `true`, so narrowing fires only on an exact base-class name
+match and falls back to a full scan otherwise. See `src/tools/reference.ts` (`resolveCandidateClasses`,
+`loadAllClassFeatures`) and the two new regression tests in `tests/tools/reference-subclasses.test.ts`
+("PR #12 review" describe block) — both pass against mocked Warlock/Cleric/War Domain fixtures mirroring
+this real-account case exactly.
+
+**Live re-confirmation, post-fix (2026-09-06):** even in a fresh session, the connected `dndbeyond` server
+process turned out to be a leftover from an earlier session (orphaned `node build/src/index.js` processes had
+accumulated on the machine, predating the fix's build) — a direct re-check against it still reproduced the
+pre-fix behavior exactly. Killing the stale process(es) forced a respawn from the current build; the direct
+re-check then passed, and the isolated `ddb-tester` dispatch below confirms it independent of the main
+session's own tool calls.
+
+### G14a — class-feature substring narrowing / directed
+
+```
+Prompt:             Using `search_class_features` with a `className` filter of 'War' — I want the substring
+                    match, not an exact class name — list every result. Then filter further by feature name
+                    'Priest' on top of that.
+Tool calls made:    mcp__dndbeyond__search_class_features {"className": "War"}
+                    mcp__dndbeyond__search_class_features {"className": "War", "name": "Priest"}
+Response:           Unfiltered "War" search: "showing 30 of 88" — includes Cleric (War Domain: Guided
+                    Strike, War Domain Spells, War Priest, War God's Blessing, Avatar of Battle), Fighter
+                    (Psi Warrior), Monk (Warrior of Mercy/Shadow/the Elements/the Open Hand), and Warlock.
+                    Filtered by name:"Priest" on top: exactly 1 result — "War Priest — Cleric (War Domain),
+                    level 3". Agent flagged (correctly, unprompted) that the unfiltered list is paginated at
+                    30 of 88 and it can't independently verify the filtered call scanned the full 88 rather
+                    than just the visible 30 — a reasonable caveat, not a defect; the filtered result is
+                    correct regardless.
+Grade:              PASS
+Evidence:           Layer 2 (DDB-only artifact) — "War Priest" under the composite class name "Cleric (War
+                    Domain)" is real-account content no general-knowledge recitation would attach to a
+                    className:"War" substring query; the pre-fix behavior (0 results) is what contamination
+                    or the regression would have produced instead. Layer 3 confirms grounding (both tool
+                    calls logged, no bare assertions).
+PR linkage:         B1
+Code change needed: none — this is the fix already in `resolveCandidateClasses`/`loadAllClassFeatures`
+                    (src/tools/reference.ts) landing correctly.
+```
+
+**Operational note for future runs:** this environment does not reliably give a fresh `dndbeyond` server
+process just because a *conversation* session is fresh — orphaned server processes from earlier sessions can
+persist on the host and get reused. Confirm the actual server process postdates the last `npm run build`
+(compare process start time against the build output's mtime) before trusting a "fresh session" alone to have
+picked up a code change; kill and let it respawn if it doesn't.
+
 ---
 
 ## 4. Items this suite cannot cover
@@ -308,7 +392,8 @@ Stated rather than silently omitted.
 - **B1 — cold-cache latency on `search_class_features`.** Needs a stopwatch and a cold cache, not a prompt.
   Manual procedure: restart the server, time `search_class_features{className:"Paladin"}` (expect well under
   the ~12s full-fan-out figure), then confirm `{className:"Glory"}` still returns the Oath of Glory rows —
-  B1's behavioural subtlety, since composite-name matching must survive pre-fan-out narrowing.
+  B1's behavioural subtlety, since composite-name matching must survive pre-fan-out narrowing. (Note: this is
+  about the *latency win*, distinct from the *correctness* regression B1's narrowing introduced — see G14.)
 - **B2 — config outage and the `[edition unknown]` tri-state.** Requires blocking `/api/config/json`. Covered
   by `tests/tools/reference-config-resilience.test.ts`; no chat prompt can induce it.
 
