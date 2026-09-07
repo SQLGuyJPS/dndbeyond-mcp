@@ -456,11 +456,7 @@ function formatSpeed(char: DdbCharacter): string {
 }
 
 function formatSpellSlots(char: DdbCharacter): string {
-  if (!char.spellSlots || char.spellSlots.length === 0) {
-    return StringUtils.EMPTY;
-  }
-
-  const lines = char.spellSlots
+  const lines = (char.spellSlots ?? [])
     .filter(slot => slot.available > 0)
     .map(slot => {
       // Clamped: a used count beyond available (stale data, a mid-flight write)
@@ -471,13 +467,20 @@ function formatSpellSlots(char: DdbCharacter): string {
       return `Level ${slot.level}: ${filled}${empty} (${slot.used}/${slot.available} used)`;
     });
 
-  if (lines.length === 0) return StringUtils.EMPTY;
-
-  let result = `\n--- Spell Slots ---\n${lines.join("\n")}`;
-
-  // Add pact magic if available (item 9 \u2014 normalized across both payload shapes)
+  // Fixed 2026-09-06 (tier-3 finding 2): this used to be gated behind
+  // `lines.length > 0`, returning early before pact magic was ever computed.
+  // A single-class Warlock's regular spellSlots are always all `available: 0`
+  // (every slot they have is a pact slot), so the early return fired every
+  // time and pact magic never displayed. Compute it unconditionally instead.
   const pactMagic = getPactMagicState(char);
-  if (pactMagic && pactMagic.available > 0) {
+  const hasPactMagic = !!pactMagic && pactMagic.available > 0;
+
+  if (lines.length === 0 && !hasPactMagic) return StringUtils.EMPTY;
+
+  let result = `\n--- Spell Slots ---`;
+  if (lines.length > 0) result += `\n${lines.join("\n")}`;
+
+  if (hasPactMagic) {
     const used = Math.min(pactMagic.used, pactMagic.available);
     const filled = "\u25CF".repeat(pactMagic.available - used);
     const empty = "\u25CB".repeat(used);
@@ -518,6 +521,59 @@ function formatHitDice(char: DdbCharacter): string {
   if (hitDiceByClass.length === 0) return StringUtils.EMPTY;
 
   return `\n--- Hit Dice ---\n${hitDiceByClass.join("\n")}${hitDiceUsed > 0 ? ` (${hitDiceUsed} used)` : ""}`;
+}
+
+// Fixed 2026-09-06 (tier-3 finding 1): char.deathSaves has a correct, independently
+// verified write path (update_death_saves) but was never read by the sheet formatter,
+// so a stabilizing character's death saves were invisible to anyone using only this
+// MCP's tools. Omit the section entirely when there's nothing to report.
+function formatDeathSaves(char: DdbCharacter): string {
+  const successCount = char.deathSaves.successCount ?? 0;
+  const failCount = char.deathSaves.failCount ?? 0;
+
+  if (successCount === 0 && failCount === 0 && !char.deathSaves.isStabilized) {
+    return StringUtils.EMPTY;
+  }
+
+  const successPips = "●".repeat(successCount) + "○".repeat(Math.max(0, 3 - successCount));
+  const failPips = "●".repeat(failCount) + "○".repeat(Math.max(0, 3 - failCount));
+  const stabilized = char.deathSaves.isStabilized ? " (Stabilized)" : "";
+
+  return `\n--- Death Saves ---\nSuccesses: ${successPips} (${successCount}/3)\nFailures: ${failPips} (${failCount}/3)${stabilized}`;
+}
+
+// Fixed 2026-09-06 (tier-3 finding 1): same gap as deathSaves — char.currencies has
+// a correct write path (update_currency) but the sheet formatter never read it.
+function formatCurrencies(char: DdbCharacter): string {
+  const { cp, sp, ep, gp, pp } = char.currencies;
+  const lines: string[] = [];
+
+  if (pp > 0) lines.push(`${pp} pp`);
+  if (gp > 0) lines.push(`${gp} gp`);
+  if (ep > 0) lines.push(`${ep} ep`);
+  if (sp > 0) lines.push(`${sp} sp`);
+  if (cp > 0) lines.push(`${cp} cp`);
+
+  if (lines.length === 0) return StringUtils.EMPTY;
+
+  return `\n--- Currency ---\n${lines.join(", ")}`;
+}
+
+// Fixed 2026-09-06 (tier-3 finding 1): char.conditions[] has correct write paths
+// (add_condition/remove_condition) but was only ever read inside those tools' own
+// success messages, never by the sheet formatter — so an active condition was
+// invisible on get_character. Reuses CONDITION_NAMES, the same table addCondition/
+// removeCondition already use.
+function formatConditions(char: DdbCharacter): string {
+  const conditions = char.conditions ?? [];
+  if (conditions.length === 0) return StringUtils.EMPTY;
+
+  const lines = conditions.map((c) => {
+    const name = CONDITION_NAMES[c.id] ?? `Condition ${c.id}`;
+    return c.level != null ? `${name} (level ${c.level})` : name;
+  });
+
+  return `\n--- Conditions ---\n${lines.join(", ")}`;
 }
 
 function formatTraits(char: DdbCharacter): string {
@@ -589,6 +645,10 @@ function formatCharacterSheet(char: DdbCharacter): string {
   const hitDice = formatHitDice(char);
   if (hitDice) sections.push(hitDice.trim());
 
+  // Add death saves display (tier-3 finding 1 — HP-adjacent, only shown when active)
+  const deathSaves = formatDeathSaves(char);
+  if (deathSaves) sections.push(deathSaves.trim());
+
   sections.push(
     StringUtils.EMPTY,
     `--- Limited-Use Resources ---`,
@@ -604,8 +664,16 @@ function formatCharacterSheet(char: DdbCharacter): string {
     formatRacialTraitNames(char)
   );
 
+  // Add conditions display (tier-3 finding 1 — only shown when a condition is active)
+  const conditions = formatConditions(char);
+  if (conditions) sections.push(conditions.trim());
+
   const inventory = formatInventory(char);
   if (inventory) sections.push(inventory);
+
+  // Add currency display (tier-3 finding 1 — inventory-adjacent, only shown when non-zero)
+  const currencies = formatCurrencies(char);
+  if (currencies) sections.push(currencies.trim());
 
   // Add traits display
   const traits = formatTraits(char);
@@ -1231,6 +1299,11 @@ const CONDITION_NAMES: Record<number, string> = {
   13: "Restrained", 14: "Stunned", 15: "Unconscious",
 };
 
+// Only Exhaustion (id 4) is leveled among the 15 conditions — see the note above
+// CONDITION_NAMES. Tracked separately so addCondition can tell a leveled condition
+// apart from one where `null` is a legitimate level.
+const LEVELED_CONDITION_IDS = new Set<number>([4]);
+
 export async function addCondition(
   client: DdbClient,
   params: AddConditionParams
@@ -1242,19 +1315,27 @@ export async function addCondition(
   );
   const maxHp = calculateMaxHp(character);
 
+  // Fixed 2026-09-06 (tier-3 finding 3): a bare `null` level on a leveled condition
+  // isn't "use the default" to D&D Beyond's API — it's "remove this condition."
+  // Reproduced live: applying Exhaustion with level 3, then re-applying it with no
+  // level, wiped the condition entirely instead of leaving/defaulting it. Default
+  // to level 1 when the caller omits a level on a leveled condition; non-leveled
+  // conditions keep forwarding `null` unchanged.
+  const level = params.level ?? (LEVELED_CONDITION_IDS.has(params.conditionId) ? 1 : null);
+
   await client.put(
     ENDPOINTS.character.condition(),
     {
       characterId: params.characterId,
       id: params.conditionId,
-      level: params.level ?? null,
+      level,
       totalHp: maxHp,
     },
     [`character:${params.characterId}`]
   );
 
   const name = CONDITION_NAMES[params.conditionId] ?? `Condition ${params.conditionId}`;
-  const levelText = params.level ? ` (level ${params.level})` : "";
+  const levelText = level ? ` (level ${level})` : "";
   return { content: [{ type: "text", text: `Added ${name}${levelText} to character ${params.characterId}.` }] };
 }
 

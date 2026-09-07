@@ -61,6 +61,84 @@ describe("condition ID mapping", () => {
   });
 });
 
+// Live-confirmed 2026-09-06 (tier-3 finding 3): applying Exhaustion (id 4) with an
+// explicit level, then re-applying it with no level, wiped the condition entirely —
+// D&D Beyond's API treats a bare `null` level on a leveled condition as "remove,"
+// not "default." addCondition now defaults to level 1 for a leveled condition when
+// the caller omits `level`, and still forwards `null` unchanged for a non-leveled one.
+describe("addCondition — leveled condition default (tier-3 finding 3)", () => {
+  it("defaults level to 1 for a leveled condition (Exhaustion, id 4) when level is omitted", async () => {
+    const putMock = vi.fn().mockResolvedValue({});
+    const mockClient = { get: vi.fn().mockResolvedValue(baseCharacter), put: putMock } as unknown as DdbClient;
+
+    const result = await addCondition(mockClient, { characterId: 123, conditionId: 4 });
+
+    expect(putMock).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ id: 4, level: 1 }),
+      expect.any(Array)
+    );
+    expect(result.content[0].text).toContain("Exhaustion");
+    expect(result.content[0].text).toContain("level 1");
+  });
+
+  it("still honors an explicit level on a leveled condition", async () => {
+    const putMock = vi.fn().mockResolvedValue({});
+    const mockClient = { get: vi.fn().mockResolvedValue(baseCharacter), put: putMock } as unknown as DdbClient;
+
+    await addCondition(mockClient, { characterId: 123, conditionId: 4, level: 3 });
+
+    expect(putMock).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ id: 4, level: 3 }),
+      expect.any(Array)
+    );
+  });
+
+  it("still forwards null for a non-leveled condition (Blinded, id 1) when level is omitted", async () => {
+    const putMock = vi.fn().mockResolvedValue({});
+    const mockClient = { get: vi.fn().mockResolvedValue(baseCharacter), put: putMock } as unknown as DdbClient;
+
+    const result = await addCondition(mockClient, { characterId: 123, conditionId: 1 });
+
+    expect(putMock).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ id: 1, level: null }),
+      expect.any(Array)
+    );
+    expect(result.content[0].text).toBe("Added Blinded to character 123.");
+  });
+});
+
+// Fixed 2026-09-06 (tier-3 finding 1): char.conditions[] has correct write paths
+// but was never read by the sheet formatter — an active condition was invisible
+// on get_character. formatConditions reuses the same CONDITION_NAMES table
+// addCondition/removeCondition already use.
+describe("formatConditions (via getCharacter sheet)", () => {
+  it("shows active conditions, including a leveled one, on the sheet", async () => {
+    const char: DdbCharacter = {
+      ...baseCharacter,
+      conditions: [{ id: 4, level: 2 }, { id: 11, level: null }],
+    };
+    const mockClient = { get: vi.fn().mockResolvedValue(char) } as unknown as DdbClient;
+
+    const result = await getCharacter(mockClient, { characterId: 123 });
+    const text = result.content[0].text;
+
+    expect(text).toContain("--- Conditions ---");
+    expect(text).toContain("Exhaustion (level 2)");
+    expect(text).toContain("Poisoned");
+  });
+
+  it("omits the Conditions section entirely when conditions[] is empty or absent", async () => {
+    const mockClient = { get: vi.fn().mockResolvedValue(baseCharacter) } as unknown as DdbClient;
+
+    const result = await getCharacter(mockClient, { characterId: 123 });
+
+    expect(result.content[0].text).not.toContain("--- Conditions ---");
+  });
+});
+
 describe("formatLimitedUseResources (via getCharacter sheet)", () => {
   it("caps max uses at maxUses + proficiency bonus when useProficiencyBonus is set", async () => {
     const char: DdbCharacter = {

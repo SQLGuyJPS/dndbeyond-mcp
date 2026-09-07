@@ -10,6 +10,8 @@ import {
   shortRest,
   addCondition,
   removeCondition,
+  getCharacter,
+  resolveChoices,
 } from "../../src/tools/character.js";
 import { ENDPOINTS } from "../../src/api/endpoints.js";
 import type { DdbClient } from "../../src/api/client.js";
@@ -177,5 +179,130 @@ describe("Live: Write endpoints (v0.8.0)", () => {
     const rested = await fetchCharacterState(client, f2Id);
     const restedArr = Array.isArray(rested.pactMagic) ? rested.pactMagic : [];
     expect(restedArr.every((row) => row.used === 0)).toBe(true);
+  });
+});
+
+/**
+ * Tier-3 behavioral testing (2026-09-06) found that currencies, deathSaves,
+ * conditions, and single-class-Warlock pact magic all persisted correctly but
+ * never showed up in get_character's formatted output — see the plan doc's
+ * "v0.8.0 tier-3 behavioral test results" section, findings 1-3. These tests
+ * go one step past write-character.test.ts's raw read-backs above: they call
+ * getCharacter() itself and assert the *formatted sheet text* reflects the
+ * write, since that's what a real caller of this MCP actually sees.
+ */
+describe("Live: get_character sheet reflects writes (tier-3 findings 1-3)", () => {
+  let client: DdbClient;
+  let f1Id: number; // Wizard 1 — currency/death-saves/conditions
+  let f2Id: number; // Warlock 3 — pact magic display
+
+  beforeAll(async () => {
+    const f1 = await setupWriteTestCharacter("F1b-DisplayCheck");
+    client = f1.client;
+    f1Id = f1.testCharacterId;
+    // formatCharacterSheet dereferences char.race.fullName unconditionally, and a
+    // bare standard-build character has race: null until species is set (unrelated
+    // pre-existing gap, not one of findings 1-3 — give the fixture a species so the
+    // sheet formatter itself doesn't throw). 2024 Human, same IDs as
+    // character-lifecycle.test.ts.
+    await client.put(ENDPOINTS.character.setRace(), { characterId: f1Id, entityRaceId: 1751441, entityRaceTypeId: 1743923279 }, [`character:${f1Id}`]);
+
+    const f2 = await setupWriteTestCharacter("F2b-WarlockDisplay");
+    // Same client for both fixtures (setupWriteTestCharacter reuses the shared live client).
+    f2Id = f2.testCharacterId;
+    await client.put(ENDPOINTS.character.setRace(), { characterId: f2Id, entityRaceId: 1751441, entityRaceTypeId: 1743923279 }, [`character:${f2Id}`]);
+    // 2024 Warlock classId=2190885 — gives it real spellcasting so formatSpellcasting
+    // (and, gated behind it, formatSpellSlots) actually runs.
+    await client.post(ENDPOINTS.character.addClass(), { characterId: f2Id, classId: 2190885, level: 3 }, [`character:${f2Id}`]);
+    // formatSpellcasting only renders (and only then does formatSpellSlots run)
+    // once the character has at least one known spell — resolve pending choices
+    // (cantrips/spells known included) the same way real fixtures were built.
+    await resolveChoices(client, { characterId: f2Id });
+  });
+
+  afterAll(async () => {
+    if (f1Id) await deleteTestCharacter(client, f1Id);
+    if (f2Id) await deleteTestCharacter(client, f2Id);
+  });
+
+  it("shows a non-zero currency write in the sheet's Currency section (finding 1)", async () => {
+    const before = await fetchCharacterState(client, f1Id);
+    await updateCurrency(client, { characterId: f1Id, currency: "gp", delta: 7 });
+
+    const result = await getCharacter(client, { characterId: f1Id, detail: "sheet" });
+    const text = result.content[0].text;
+    expect(text).toContain("--- Currency ---");
+    // Delta, not absolute — a fresh build may not start at 0 gp.
+    expect(text).toMatch(new RegExp(`\\b${before.currencies.gp + 7} gp\\b`));
+
+    await updateCurrency(client, { characterId: f1Id, currency: "gp", delta: -7 });
+  });
+
+  it("shows a death-saves write in the sheet's Death Saves section (finding 1)", async () => {
+    await updateDeathSaves(client, { characterId: f1Id, type: "success", count: 2 });
+
+    const result = await getCharacter(client, { characterId: f1Id, detail: "sheet" });
+    const text = result.content[0].text;
+    expect(text).toContain("--- Death Saves ---");
+    expect(text).toContain("Successes: ●●○ (2/3)");
+
+    await updateDeathSaves(client, { characterId: f1Id, type: "success", count: 0 });
+  });
+
+  it("shows an active condition in the sheet's Conditions section (finding 1)", async () => {
+    await addCondition(client, { characterId: f1Id, conditionId: 11 }); // Poisoned — not leveled
+
+    const result = await getCharacter(client, { characterId: f1Id, detail: "sheet" });
+    const text = result.content[0].text;
+    expect(text).toContain("--- Conditions ---");
+    expect(text).toContain("Poisoned");
+
+    await removeCondition(client, { characterId: f1Id, conditionId: 11 });
+  });
+
+  it("addCondition without a level defaults Exhaustion to level 1 instead of clearing it (finding 3)", async () => {
+    // Reproduces the exact regression: apply with an explicit level, then
+    // re-apply with none. Before the fix this second call wiped the condition.
+    await addCondition(client, { characterId: f1Id, conditionId: 4, level: 3 });
+    await addCondition(client, { characterId: f1Id, conditionId: 4 });
+
+    const after = await fetchCharacterState(client, f1Id);
+    const exhaustion = after.conditions?.find((c) => c.id === 4);
+    expect(exhaustion).toBeDefined();
+    expect(exhaustion?.level).toBe(1);
+
+    const result = await getCharacter(client, { characterId: f1Id, detail: "sheet" });
+    expect(result.content[0].text).toContain("Exhaustion (level 1)");
+
+    await removeCondition(client, { characterId: f1Id, conditionId: 4 });
+  });
+
+  it("addCondition without a level still forwards null for a non-leveled condition (finding 3 verification)", async () => {
+    // Per the fix's caveat: this session hadn't previously confirmed null is
+    // safe for a non-leveled condition — verify it applies cleanly and doesn't
+    // get treated as a clear on a *fresh* apply (no prior state to wipe).
+    await addCondition(client, { characterId: f1Id, conditionId: 1 }); // Blinded
+
+    const after = await fetchCharacterState(client, f1Id);
+    const blinded = after.conditions?.find((c) => c.id === 1);
+    expect(blinded).toBeDefined();
+    // Non-leveled conditions aren't asserted to persist exactly `null` here —
+    // the API's own representation of "no level" (null vs. omitted) isn't
+    // pinned down by this session — only that applying it doesn't silently
+    // default it to a real level (1) the way the leveled-condition fix does.
+    expect(blinded?.level).toBeFalsy();
+
+    await removeCondition(client, { characterId: f1Id, conditionId: 1 });
+  });
+
+  it("shows Pact Magic in the sheet for a single-class Warlock (finding 2)", async () => {
+    await updatePactMagic(client, { characterId: f2Id, used: 1 });
+
+    const result = await getCharacter(client, { characterId: f2Id, detail: "sheet" });
+    const text = result.content[0].text;
+    expect(text).toContain("--- Spell Slots ---");
+    expect(text).toMatch(/Pact Magic \(Level \d\): .*\(1\/\d used\)/);
+
+    await updatePactMagic(client, { characterId: f2Id, used: 0 });
   });
 });
