@@ -823,21 +823,21 @@ just mocked — the same fixture-and-read-back discipline the plan specifies.
 
 ### Next steps
 
-1. **Tier 3 behavioral testing (§3.3) is now done — see the results section below.** It surfaced real,
+1. ~~**Tier 3 behavioral testing (§3.3) is now done — see the results section below.**~~ **Done, and the
+   display gap it surfaced is now fixed (2026-09-06, commit `25482eb`).** Tier 3 found real,
    previously-unrecorded display gaps (currencies/deathSaves/conditions/single-class pact magic never
-   appear in `get_character`'s output despite correct writes) and one genuine regression risk
-   (`add_condition` without an explicit `level` silently clears an existing leveled condition). None of
-   these were caught by tier 1 or tier 2, which is exactly the gap tier 3 exists to close — tier 2 proves
-   the API accepts the write; tier 3 proved a player or DM using only these tools has no way to read four
-   of those writes back. **Recommend fixing the display gap (finding 1) before tagging the release** —
-   the write paths this release restored are only half-restored from a usability standpoint until their
-   values are visible again. The `add_condition` bug (finding 3) is lower urgency (only affects omitting
-   `level` on Exhaustion specifically) but should not ship silently either.
+   appearing in `get_character`'s output despite correct writes) and one genuine regression risk
+   (`add_condition` without an explicit `level` silently clearing an existing leveled condition). None of
+   these were caught by tier 1 or tier 2 at the time, which is exactly the gap tier 3 exists to close —
+   tier 2 proves the API accepts the write; tier 3 proved a player or DM using only these tools had no way
+   to read four of those writes back. Both are now fixed and re-verified at all three tiers (see the
+   results-table update and findings 1-3 above) — **the recommendation to fix the display gap before
+   tagging is satisfied.**
 2. **Release checklist (§5) status:** 1 ✅, 2 ✅, 3 ✅ (no "deprecation accepted" branches remain), 4 ✅
    (tier 3 dispatched, results recorded, scrubbed summary appended below — see findings above for
    follow-up work this surfaced), 5 ✅ (sweep confirms no orphans after this session's fixtures were
-   cleaned up too), 6 ✅, 7 ✅, 8 ✅, 9 ⬜ (no git tag or release notes cut yet — pending user sign-off,
-   and arguably should wait on finding 1's fix given how much of item 5/9's write surface it affects).
+   cleaned up too), 6 ✅, 7 ✅, 8 ✅, 9 ⬜ (findings 1-3 are now fixed and re-verified — item 1's blocker
+   on tagging is cleared; no git tag or release notes cut yet, pending user sign-off).
 3. **Decide whether to open this as a real PR** against `origin/main` (or the upstream fork) now, or
    continue accumulating v0.9.0 work on top of `feat/0.8.0-write-path` first. Nothing has been pushed
    beyond `release/v0.8.0`.
@@ -873,35 +873,48 @@ here because, uncaught, it would have produced false FAIL grades below indisting
 | ID | Item | Naturalistic/Directed | Grade |
 |---|---|---|---|
 | W1a | 5 | naturalistic | INCONCLUSIVE |
-| W1b | 5 | directed | PARTIAL |
-| W1c | 5 | directed (merge) | PARTIAL |
+| W1b | 5 | directed | ~~PARTIAL~~ → **PASS** (2026-09-06, `25482eb`) |
+| W1c | 5 | directed (merge) | ~~PARTIAL~~ → **PASS** (2026-09-06, `25482eb`) |
 | W2a | 9 | naturalistic | INCONCLUSIVE |
-| W2b | 9 | directed | FAIL |
-| W3a | 6 | naturalistic | PARTIAL |
+| W2b | 9 | directed | ~~FAIL~~ → **PASS** (2026-09-06, `25482eb`) |
+| W3a | 6 | naturalistic | ~~PARTIAL~~ → **PASS** (2026-09-06, `25482eb`) |
 | W3b | 6 | directed | PASS |
-| W4a | 13/14 | naturalistic | PARTIAL |
-| W4b | 13/14 | directed | FAIL |
+| W4a | 13/14 | naturalistic | ~~PARTIAL~~ → **PASS** (2026-09-06, `25482eb`) |
+| W4b | 13/14 | directed | ~~FAIL~~ → **PASS** (2026-09-06, `25482eb`) |
 
-**1/9 PASS, 4/9 PARTIAL, 2/9 FAIL, 2/9 INCONCLUSIVE.** Every write this suite actually exercised persisted
+**Originally 1/9 PASS, 4/9 PARTIAL, 2/9 FAIL, 2/9 INCONCLUSIVE.** Every write this suite actually exercised persisted
 correctly at the API level, independently confirmed out-of-band for all four PARTIAL/FAIL write tests (W1b, W1c,
-W3a, W4a) — **item 5, 6, 9 and 13's write-side logic all check out.** The PARTIAL/FAIL grades are overwhelmingly
+W3a, W4a) — **item 5, 6, 9 and 13's write-side logic all check out.** The PARTIAL/FAIL grades were overwhelmingly
 one root cause (finding 1, below), not four separate write-path bugs. The two INCONCLUSIVE results (W1a, W2a) are
 fixture/prompt mismatches (a Fighter asked to cast Fireball; a Warlock asked to cast a spell it doesn't have
 prepared) — in both cases the subject correctly refused to fabricate a write rather than guessing, which is the
-behavior §3.3's Threat A/B framing asks for, but it means those two tests didn't exercise anything.
+behavior §3.3's Threat A/B framing asks for, but it means those two tests didn't exercise anything; they remain
+INCONCLUSIVE (see finding 4) rather than re-run, since the gap is in the fixture/prompt, not the product.
+
+**Update (2026-09-06, commit `25482eb`): findings 1-3 are fixed and re-verified.** `formatCharacterSheet` now
+reads `char.currencies`/`char.deathSaves`/`char.conditions[]`, `formatSpellSlots` computes pact magic
+unconditionally instead of returning early, and `addCondition` defaults an omitted `level` to 1 for a leveled
+condition instead of forwarding `null` (which D&D Beyond's API treats as "clear"). Verified at all three tiers:
+414/414 unit tests (12 new), 65/65 live tests against the real API (6 new, asserting the *formatted sheet text*
+reflects each write, not just the raw field), and a fresh Tier 3 dispatch — `ddb-character-writer` re-ran exactly
+the five checks behind W1b/W1c/W3a/W4a/W4b against new `MCPTEST-T3b-Fighter`/`MCPTEST-T3b-Warlock` fixtures and
+reported PASS on all five with quoted sheet output as evidence (fixtures deleted afterward, sweep confirmed no
+orphans). W3b was already PASS and unaffected. W1a/W2a stay INCONCLUSIVE — unrelated fixture/prompt mismatches
+(finding 4), not re-run.
 
 ### Findings (ranked)
 
-1. **HIGH — `currencies`, `deathSaves`, and `conditions` are completely absent from `get_character`'s output, at
-   every detail level (summary/sheet/full).** Confirmed by W1b (gold), W1c (death saves), and W4a (conditions):
-   in each case the write independently verified correct (out-of-band), but the subject — using only the tools
-   this MCP exposes — had no way to read any of the three back, and correctly said so rather than reporting false
-   confidence. `character.currencies` is read only inside `updateCurrency` (to compute a delta); `deathSaves` and
-   `CONDITION_NAMES` are likewise never consulted by the sheet formatter. This is the single largest tier-3
-   finding: it silently defeats half of item 5's restoration and all of item 13's, from a usability standpoint,
-   even though every underlying write is correct. **Fix:** add currency, death-save, and conditions sections to
-   the character-sheet formatter (`src/tools/character.ts`) reading the fields that already exist on `DdbCharacter`.
-2. **HIGH — Pact Magic never displays for a single-class Warlock.** `formatSpellSlots`
+1. **HIGH — FIXED (2026-09-06, `25482eb`).** `currencies`, `deathSaves`, and `conditions` are completely absent from
+   `get_character`'s output, at every detail level (summary/sheet/full). Confirmed by W1b (gold), W1c (death saves),
+   and W4a (conditions): in each case the write independently verified correct (out-of-band), but the subject — using
+   only the tools this MCP exposes — had no way to read any of the three back, and correctly said so rather than
+   reporting false confidence. `character.currencies` is read only inside `updateCurrency` (to compute a delta);
+   `deathSaves` and `CONDITION_NAMES` are likewise never consulted by the sheet formatter. This is the single
+   largest tier-3 finding: it silently defeats half of item 5's restoration and all of item 13's, from a usability
+   standpoint, even though every underlying write is correct. **Fix (applied):** added `formatCurrencies`,
+   `formatDeathSaves`, and `formatConditions` to `formatCharacterSheet` (`src/tools/character.ts`), each omitting
+   its section when there's nothing to report. Re-verified at all three tiers — see the results-table update above.
+2. **HIGH — FIXED (2026-09-06, `25482eb`).** Pact Magic never displays for a single-class Warlock. `formatSpellSlots`
    ([character.ts:474](../../src/tools/character.ts#L474)) filters regular `spellSlots` to `available > 0` and
    returns immediately if that list is empty — before ever reaching the `getPactMagicState` pact-magic append a
    few lines later. A single-class Warlock's regular `spellSlots` are *always* all `available: 0` (all of their
@@ -909,18 +922,20 @@ behavior §3.3's Threat A/B framing asks for, but it means those two tests didn'
    writing real non-zero pact-magic state. Item 9's whole purpose was making pact magic visible and correct; the
    normalization logic itself is correct (independently confirmed: a direct `update_pact_magic` write landed on
    the correct level-2 row for this Warlock-3 fixture, and a `short_rest` correctly reset it — W3a), but the
-   display never fires for the most common Warlock shape. **Fix:** compute and append the pact-magic line
-   unconditionally, not gated on regular spell slots being non-empty.
-3. **MEDIUM — `add_condition` with no explicit `level` silently clears an existing leveled condition instead of
-   adding one.** Found by W4b, whose prompt (deliberately mechanical, per §3.3) never specified a level —
-   realistic phrasing for a condition that isn't Exhaustion, where level doesn't apply. Reproduced twice
-   independently: applying condition id 4 (Exhaustion) with `level: 3` persists correctly; immediately calling
-   `add_condition` again with the *same id and no level* wipes the condition from the character entirely (empty
-   `conditions[]`), rather than adding it at a default level or leaving the existing level untouched.
-   `addCondition` ([character.ts:1234](../../src/tools/character.ts#L1234)) sends `level: params.level ?? null`
+   display never fired for the most common Warlock shape. **Fix (applied):** `formatSpellSlots` now computes the
+   pact-magic line unconditionally, not gated on regular spell slots being non-empty. Re-verified at all three
+   tiers — see the results-table update above.
+3. **MEDIUM — FIXED (2026-09-06, `25482eb`).** `add_condition` with no explicit `level` silently clears an existing
+   leveled condition instead of adding one. Found by W4b, whose prompt (deliberately mechanical, per §3.3) never
+   specified a level — realistic phrasing for a condition that isn't Exhaustion, where level doesn't apply.
+   Reproduced twice independently: applying condition id 4 (Exhaustion) with `level: 3` persists correctly;
+   immediately calling `add_condition` again with the *same id and no level* wipes the condition from the character
+   entirely (empty `conditions[]`), rather than adding it at a default level or leaving the existing level untouched.
+   `addCondition` ([character.ts:1234](../../src/tools/character.ts#L1234)) sent `level: params.level ?? null`
    unconditionally — D&D Beyond's API treats a bare `null` level on a leveled condition as "remove," not
-   "default." **Fix:** default to level 1 for a leveled condition (currently only Exhaustion, id 4) when the
-   caller omits `level`, or reject the call and ask for one, rather than forwarding `null`.
+   "default." **Fix (applied):** defaults to level 1 for a leveled condition (currently only Exhaustion, id 4) when
+   the caller omits `level`; non-leveled conditions still forward `null` unchanged, live-verified against Blinded
+   (id 1). Re-verified at all three tiers — see the results-table update above.
 4. **LOW — two fixture/prompt mismatches produced INCONCLUSIVE results (W1a, W2a) rather than real signal.** F1
    is a Fighter (per the fixture catalog's own spec — no specific build required for item 5/6/13 tests), so "I
    cast Fireball" has no spell to attach to; F2's auto-resolved spell picks (§3.1 P3: "first-available, repeatable
