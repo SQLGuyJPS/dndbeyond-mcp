@@ -101,3 +101,15 @@ apologetic error message, not a decommissioned API — see `v0.8.0` below.*
 - **Condition ID 15 was mislabeled Exhaustion; it's actually ID 4** — corrected and live-verified.
 - **`updateHp` 400s if `tempHp` is omitted** (found live while verifying the above) — now always sends
   `temporaryHitPoints`, defaulting to the character's current value.
+- **`currencies`, `deathSaves`, and `conditions` were absent from `get_character`'s output at every detail
+  level**, despite all three having correct write paths — found by tier-3 behavioral testing. Added
+  `formatCurrencies`/`formatDeathSaves`/`formatConditions` to the sheet formatter.
+- **Pact Magic never displayed for a single-class Warlock** — the display logic returned early whenever
+  regular spell slots were empty, which is always true for a single-class Warlock. Now computed unconditionally.
+- **`add_condition` with no explicit `level` silently cleared an existing leveled condition** instead of
+  adding/defaulting one, because D&D Beyond's API treats a bare `null` level as "remove." Now defaults to
+  level 1 for a leveled condition when the caller omits `level`.
+- **`long_rest` did not clear death saves**, despite its own code comment claiming the server-side reset
+  handled it atomically — live-verified the rest endpoint's response carries no `deathSaves` field, and
+  death saves survived a long rest that fully restored HP. `long_rest` now explicitly clears them when
+  nonzero, after the rest itself succeeds; `short_rest` is confirmed (not assumed) to leave them untouched.

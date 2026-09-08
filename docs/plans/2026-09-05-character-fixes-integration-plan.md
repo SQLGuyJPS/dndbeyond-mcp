@@ -1019,7 +1019,9 @@ needed for `shortRest()`**, only a comment explaining the deliberate asymmetry s
 "fix" it to match `longRest()` without re-probing.
 
 **Verification.** Unit: 3 new mocked tests on `longRest` (clears when nonzero, skips the extra write when
-zero, never clears if the rest POST throws) — 420/420 unit tests pass. Live (`tests/live/write-character.test.ts`):
+zero, never clears if the rest POST throws) — 417/417 unit tests pass (the commit message and this section
+originally said 420/420; corrected here after a final pre-merge count came up 3 short — 414 pre-existing +
+these 3 new tests is 417, not 420). Live (`tests/live/write-character.test.ts`):
 2 new round-trip tests, both asserting via independent read-back per Threat C — `longRest` clears death saves
 after restoring HP, and `shortRest` leaves them untouched — 67/67 live tests pass. `test:live:sweep` confirms
 no orphaned `MCPTEST-` characters after this session.
