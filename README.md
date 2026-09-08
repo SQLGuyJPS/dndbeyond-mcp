@@ -90,7 +90,11 @@ After adding the configuration, restart Claude Desktop.
 - `update_hp` — Apply damage or healing
 - `update_spell_slots` — Use or restore spell slots
 - `update_death_saves` — Record death saves
-- `update_currency` — Modify gold/silver/copper
+- `update_currency` — Modify gold/silver/copper/electrum/platinum
+- `update_pact_magic` — Use or restore a Warlock's pact magic slots
+- `cast_spell` — Cast a known spell by name, consuming the right spell/pact slot
+- `short_rest` / `long_rest` — Server-side rest, restoring HP/slots/hit dice/limited-use abilities as appropriate
+- `add_condition` / `remove_condition` — Apply or clear a condition (see the tool description for the current ID table)
 - `use_ability` — Decrement limited-use features
 
 ### Campaign
@@ -163,6 +167,19 @@ Released as annotated tags (dndtools pins one by tag):
   - **Fixed a no-`edition`-argument inconsistency** in every compendium `get_*` detail tool (`get_class`, `get_background`, `get_feat`, `get_item`, `get_race`, `get_spell`, `get_subclass`): when `edition` was omitted, these silently returned whichever variant the live API happened to list first — frequently 2014 — rather than the same 2024 default `search_*`/`get_condition` already used. Fixed once in the shared `pickByEdition` helper (plus `get_subclass`'s equivalent inline selection logic) rather than per call site, so this can't be reintroduced by a future handler forgetting a guard. Confirmed via a 30-test behavioral suite (`docs/plans/2026-08-31-edition-awareness-test-plan.md`) that also validated the rest of this release's edition-awareness work end to end.
   - **`list_sources`** now takes an optional `nameFilter` — matched against both the source's short code and its full title — since the unfiltered list runs to ~53k characters on a typical account. `resolveSourceId` (used internally by `search_items`'/`search_monsters`' `source` filter) had the same short-code-only matching gap and was fixed alongside it.
 - **`v0.7.0` breaking change** — `get_condition` now **defaults to `2024`** (current) instead of `2014`, matching every other edition-aware tool's default. The old default was a deliberate `v0.2.0` choice that became a cross-tool trap once every compendium entity became edition-aware: the same conversation could get 2024 rules from `get_class` and 2014 rules from `get_condition` with neither call passing `edition`. Pass `edition: "2014"` explicitly to keep the old behavior.
+- **`v0.8.0`** — **Restored five write tools that were dead code:** `update_spell_slots`, `update_death_saves`, `update_currency`, `update_pact_magic`, and `cast_spell`'s slot-consumption path all silently caught a 404 and returned an apology — D&D Beyond had moved these endpoints (characterId into the body, level-indexed field names) and this fork had never followed. All four now work, each verified live against a real test character with an independent read-back, not just a 200 response. Beyond the write-path restoration:
+  - `long_rest`/`short_rest` switch from a GET-with-query call to POST-with-body. The old GET form is a live false success — it returns 200 with plausible descriptive text but doesn't persist the reset; a Warlock's pact magic `used` count was confirmed unchanged after a "successful" GET short rest.
+  - Pact magic is now normalized across both payload shapes D&D Beyond has used: a single object, and — the shape a live Warlock actually returns today — an array of per-level rows with `available` left at 0, backfilled from Warlock level progression.
+  - **Condition ID 4 is Exhaustion, not 15** — this fork's table had it wrong; corrected and verified live (only one of the 15 conditions accepts a numeric level, and it was id 4). `DdbLimitedUse.resetType` is corrected to `1=Short Rest, 2=Long Rest, 3=Dawn, 4=Other` (the previous type comment had Short and Long Rest swapped), with a numeric fallback table and `useProficiencyBonus` handling for limited-use resources.
+  - **`get_character` now shows currencies, death saves, and conditions** — all three had correct write paths but were completely absent from the formatted sheet at every detail level, so a successful `update_currency`/`update_death_saves`/`add_condition` call had no way to be read back. Each section is omitted when there's nothing to report.
+  - **Pact Magic now displays for single-class Warlocks** — it previously never appeared for the most common Warlock shape, because the display logic returned early whenever regular (non-pact) spell slots were empty, which they always are for a single-class Warlock.
+  - **`add_condition` no longer clears an existing leveled condition when `level` is omitted** — D&D Beyond's API treats a bare `null` level as "remove," not "default." Omitting `level` on a leveled condition (currently only Exhaustion) now defaults to level 1 instead of wiping it.
+  - **`long_rest` now clears death saves** — the code (and this tool's description) previously claimed the server-side long-rest reset handled death saves atomically; live verification found the rest endpoint's response carries no `deathSaves` field at all, and death saves survived a long rest that fully restored HP, contradicting 5e rules. `long_rest` now reads the character first and, only when it has a nonzero death-save count, follows up with an explicit clear. `short_rest` is deliberately left alone — probed separately and confirmed to leave death saves untouched, since it doesn't restore HP.
+  - See [Acknowledgments](#acknowledgments) — the endpoint shapes and both corrected ID tables originate from grahamethompson/dndbeyond-mcp's independent work on this fork's common ancestor.
+
+## Acknowledgments
+
+Several `v0.8.0` fixes are ported from [grahamethompson/dndbeyond-mcp](https://github.com/grahamethompson/dndbeyond-mcp), a fork that diverged from the same upstream project and independently did deep work on character-sheet accuracy and the character write path — areas this fork had otherwise left untouched. His fork found the corrected v5 write-endpoint contract (spell slots, death saves, currency, pact magic), the live pact-magic array payload shape, and both the condition-ID and `resetType` mapping corrections. Each port was reimplemented against this fork's own types and conventions and independently reverified live before being merged — see `docs/fork-comparison-2026-09-05-grahamethompson.md` and `docs/plans/2026-09-05-character-fixes-integration-plan.md` for the full comparison and verification record.
 
 ## Known issues
 

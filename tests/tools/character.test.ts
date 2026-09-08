@@ -402,6 +402,79 @@ describe("getCharacter with detail levels", () => {
   });
 });
 
+// Fixed 2026-09-06 (tier-3 finding 1): currencies and deathSaves have correct,
+// independently-verified write paths (update_currency, update_death_saves) but
+// were never read by the sheet formatter. Sections are omitted entirely when
+// there's nothing to report, matching the existing formatSpeed/formatProficiencies
+// pattern — a level-1 character with 0 gold and no death saves shouldn't grow
+// empty headers.
+describe("formatCharacterSheet — currency and death saves display", () => {
+  it("shows non-zero currency on the sheet", async () => {
+    const client = createMockClient();
+    vi.mocked(client.get).mockResolvedValue(mockCharacter); // gp:125, sp:50, pp:2
+
+    const result = await getCharacter(client, { characterId: 12345, detail: "sheet" });
+    const text = result.content[0].text;
+
+    expect(text).toContain("--- Currency ---");
+    expect(text).toContain("2 pp");
+    expect(text).toContain("125 gp");
+    expect(text).toContain("50 sp");
+    expect(text).not.toContain(" cp"); // cp is 0, omitted from the list
+  });
+
+  it("omits the Currency section entirely when all denominations are zero", async () => {
+    const client = createMockClient();
+    const brokeCharacter: DdbCharacter = {
+      ...mockCharacter,
+      currencies: { cp: 0, sp: 0, ep: 0, gp: 0, pp: 0 },
+    };
+    vi.mocked(client.get).mockResolvedValue(brokeCharacter);
+
+    const result = await getCharacter(client, { characterId: 12345, detail: "sheet" });
+
+    expect(result.content[0].text).not.toContain("--- Currency ---");
+  });
+
+  it("shows death saves on the sheet when a save has been recorded", async () => {
+    const client = createMockClient();
+    const dyingCharacter: DdbCharacter = {
+      ...mockCharacter,
+      deathSaves: { successCount: 1, failCount: 2, isStabilized: false },
+    };
+    vi.mocked(client.get).mockResolvedValue(dyingCharacter);
+
+    const result = await getCharacter(client, { characterId: 12345, detail: "sheet" });
+    const text = result.content[0].text;
+
+    expect(text).toContain("--- Death Saves ---");
+    expect(text).toContain("Successes: ●○○ (1/3)");
+    expect(text).toContain("Failures: ●●○ (2/3)");
+  });
+
+  it("shows the stabilized flag when set", async () => {
+    const client = createMockClient();
+    const stabilizedCharacter: DdbCharacter = {
+      ...mockCharacter,
+      deathSaves: { successCount: 3, failCount: 0, isStabilized: true },
+    };
+    vi.mocked(client.get).mockResolvedValue(stabilizedCharacter);
+
+    const result = await getCharacter(client, { characterId: 12345, detail: "sheet" });
+
+    expect(result.content[0].text).toContain("(Stabilized)");
+  });
+
+  it("omits the Death Saves section entirely when no saves are recorded", async () => {
+    const client = createMockClient();
+    vi.mocked(client.get).mockResolvedValue(mockCharacter); // successCount/failCount both null
+
+    const result = await getCharacter(client, { characterId: 12345, detail: "sheet" });
+
+    expect(result.content[0].text).not.toContain("--- Death Saves ---");
+  });
+});
+
 describe("listCharacters", () => {
   it("should return formatted list of characters", async () => {
     const client = createMockClient();

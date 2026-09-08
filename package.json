@@ -1,6 +1,6 @@
 {
   "name": "dndbeyond-mcp",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "MCP server for D&D Beyond",
   "type": "module",
   "main": "build/src/index.js",
@@ -28,7 +28,9 @@
     "compendium:download": "node build/src/scripts/download-compendium.js",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:live": "vitest run --config vitest.live.config.ts"
+    "test:live": "vitest run --config vitest.live.config.ts",
+    "test:live:sweep": "node build/src/scripts/sweep-test-characters.js",
+    "test:live:sweep:dry-run": "node build/src/scripts/sweep-test-characters.js --dry-run"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
