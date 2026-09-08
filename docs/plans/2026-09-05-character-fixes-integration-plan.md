@@ -845,6 +845,11 @@ just mocked — the same fixture-and-read-back discipline the plan specifies.
    graph says land item 3 (`computeCharacterAbilityScore`) first since items 2 and 4 both build on it.
    PR 8 (item 2, AC) should also investigate the AC-reading-inconsistently-across-calls note from the
    tier-3 results below (F2, no equipment change between reads).
+5. **New, unfixed (2026-09-07 — see "Post-release validation" below): `long_rest` does not clear death
+   saves**, despite `longRest()`'s own code comment claiming it does. Needs its own small fix/PR before or
+   alongside v0.9.0 — not blocking 0.8.0's tag (death saves surviving a rest is a pre-existing gap in a
+   tool this plan already restored, not a regression from anything in this release), but should not be
+   forgotten. See the "Post-release validation" section for the full evidence trail.
 
 ---
 
@@ -949,3 +954,61 @@ orphans). W3b was already PASS and unaffected. W1a/W2a stay INCONCLUSIVE — unr
    no equipment change in between** (W3a). Leather stayed equipped (`armorClass: 11`, DEX +2, expected AC 13
    consistently) — unexplained by anything this session touched. Out of scope for v0.8.0 (this is item 2 / v0.9.0
    territory), not investigated further; flagged for whoever picks up PR 8.
+
+## Post-release validation (2026-09-07)
+
+User-requested re-check, prompted by a concern that P5's "pact magic `available` is always 0" finding might
+have been an artifact of a badly-built/fresh Phase 0 test fixture rather than real API behavior. Run against
+`Warlock Test` (character ID `170774181`), a **real, user-built, non-`MCPTEST-` character** — Warlock 5
+(Archfey Patron), independently constructed and populated with real spells/features/equipment, then
+deliberately played into mid-adventuring-day state (pact slots spent, HP below max) before this session
+touched it. This is a stronger fixture than P5's for this specific question: it rules out "fresh/default
+character" as an explanation, since D&D Beyond was already tracking real consumed state on it.
+
+**P5 re-confirmed, root cause pinned down precisely.** Raw `character-service` JSON (fetched directly via a
+throwaway script using `DdbClient`, bypassing the MCP tool's text formatting, deleted after use) showed:
+
+```json
+{ "level": 3, "used": 2, "available": 0 }
+```
+
+Level 3 is this character's real active pact-slot row (Warlock 5 → `warlockSlotLevel(5) = 3`) — `used: 2`
+proves the API *is* tracking real spent-slot state on that exact row, while `available` sits at `0` regardless.
+**Confirms P5 was not a fixture artifact; `getPactMagicState`'s PHB-table backfill in
+`src/utils/character-spell-slots.ts` is necessary, correctly targets the right row, and is the only reason the
+formatted sheet showed "2/2 used" instead of "0/0."** No code change needed here — this was pure re-verification.
+
+**Full write-path smoke test on the same character** (`ddb-character-writer`, each write independently
+read back): `short_rest` (correctly reset pact magic to 0/2 used, left HP untouched — matches P9/5e rules),
+`update_pact_magic`, `update_hp`, `update_death_saves` (success/failure merge still correct, per finding 1's
+fix), `add_condition`/`remove_condition`, `update_currency` (delta mode), and `long_rest` (restored HP to max,
+reset pact magic) all persisted correctly on read-back. Existing automated suite (80 tests across the
+pact-magic/spell-slots/rest/conditions/write-path files touched by 0.8.0) also still passes in full.
+
+**New finding — NOT FIXED. `long_rest` does not clear death saves.** Sequence: recorded 1 success + 1 failure
+via `update_death_saves`, damaged the character further (HP 25→15), then called `long_rest`. Read-back showed
+HP correctly restored to 28/28 and pact magic correctly reset, but death saves remained `1/3` successes and
+`1/3` failures — per 5e rules, death saves should clear on regaining any HP, which a long rest that restores
+HP to full unambiguously does. `longRest()`'s own comment in `src/tools/character.ts`
+(`// ... Server-side long rest handles all resets atomically: HP, spell slots, pact magic, limited-use
+abilities, hit dice, death saves.`) explicitly claims death saves are part of the atomic server-side reset —
+**this claim is not backed by any evidence in this plan.** P9 (§3.1 results table, above) only confirmed HP
+(`removedHitPoints`), spell slots, pact magic, and hit dice via echoed response body + independent read-back;
+death saves (and "limited-use abilities," e.g. `Magical Cunning`/`Luck Points`-style resources) were never
+part of P9's probe or any later tier-3 check. The comment's death-saves clause appears to have been an
+assumption folded in from general 5e-rules knowledge when the comment was written, not something anyone
+actually tested against the live API — this is a newly-discovered gap, unrelated to the earlier GET-vs-POST
+false-success finding (P9) it sits next to in the code. **Needs a fix**: either the `rest/long` endpoint body
+needs a field that clears death saves (unconfirmed whether one exists — not probed), or `longRest()` needs to
+follow up with an explicit `update_death_saves(0, 0)` call when the character had nonzero death saves before
+the rest. Also worth probing what `short_rest` does to death saves (not tested this session — a short rest
+that doesn't restore HP arguably should *not* clear them, per 5e rules, so the correct behavior differs
+between the two rest tools).
+
+**Finding 6 (AC flicker) reproduced transiently, still not a confirmed defect.** During the write-path
+sequence above, AC read 12 → 13 → 12 → 13 → 12 across `get_character` calls interleaved with unrelated writes
+(short rest, add/remove condition) with no equipment change. A dedicated follow-up — three consecutive
+`get_character` calls on the same character with *no* writes in between — held steady at AC 12 every time.
+Consistent with finding 6's read on F2: the flicker seems tied to a write-triggered cache/read-timing race
+rather than `calculateAc`'s (pure, deterministic) formula itself, but still unconfirmed and not reproducible
+on demand. Still out of scope for v0.8.0/this session; flagged again for whoever picks up PR 8 (item 2, AC).
