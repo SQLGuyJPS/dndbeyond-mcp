@@ -2,7 +2,7 @@
 
 A TypeScript MCP (Model Context Protocol) server for D&D Beyond. Gives Claude (and other MCP-compatible AI assistants) access to your D&D Beyond characters, campaigns, spells, monsters, items, and more.
 
-> **This is a fork** of [AlexWorland/dndbeyond-mcp](https://github.com/AlexWorland/dndbeyond-mcp). It adds **edition-aware reference lookups** (2014 vs 2024) for spells, conditions, monsters, items, classes, species/races, backgrounds, feats, class features, and racial traits — resolved via D&D Beyond's `isLegacy` flag where present, or derived from the entity's source book otherwise — plus `get_class`, `get_race`, `get_background`, and `get_feat` detail lookups, character-independent `search_subclasses`/`get_subclass`, additional reference tools (races, backgrounds, class features, racial traits, source books), optional `campaignId` support across the reference tools, a resumable **compendium snapshot downloader**, **damage/condition resistances in monster stat blocks**, and makes **`check_auth` a real session-liveness probe**. It is the MCP backend for [dndtools](https://github.com/dmjohnston89/dndtools) and is **built from source** (not published to npm — see Installation). Released via annotated tags (current: **`v0.7.0`**); see [Fork changes](#fork-changes).
+> **This is a fork** of [AlexWorland/dndbeyond-mcp](https://github.com/AlexWorland/dndbeyond-mcp). It adds **edition-aware reference lookups** (2014 vs 2024) for spells, conditions, monsters, items, classes, species/races, backgrounds, feats, class features, and racial traits — resolved via D&D Beyond's `isLegacy` flag where present, or derived from the entity's source book otherwise — plus `get_class`, `get_race`, `get_background`, and `get_feat` detail lookups, character-independent `search_subclasses`/`get_subclass`, additional reference tools (races, backgrounds, class features, racial traits, source books), optional `campaignId` support across the reference tools, a resumable **compendium snapshot downloader**, **damage/condition resistances in monster stat blocks**, and makes **`check_auth` a real session-liveness probe**. It is the MCP backend for [dndtools](https://github.com/dmjohnston89/dndtools) and is **built from source** (not published to npm — see Installation). Released via annotated tags (current: **`v0.8.1`**); see [Fork changes](#fork-changes).
 
 > **Disclaimer:** This project uses unofficial, reverse-engineered D&D Beyond endpoints. It is not affiliated with, endorsed by, or supported by D&D Beyond or Wizards of the Coast. Endpoints may change without notice.
 
@@ -22,7 +22,7 @@ This fork is **not published to npm**, so `npx dndbeyond-mcp` will not work. Bui
 ```bash
 git clone https://github.com/dmjohnston89/dndbeyond-mcp
 cd dndbeyond-mcp
-git checkout v0.7.0
+git checkout v0.8.1
 npm ci
 npm run build
 ```
