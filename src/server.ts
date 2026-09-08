@@ -320,7 +320,7 @@ export async function startServer(): Promise<void> {
 
   server.tool(
     "long_rest",
-    "Perform a long rest: restores HP, spell slots, pact magic, limited-use abilities, hit dice, and death saves (server-side)",
+    "Perform a long rest: restores HP, spell slots, pact magic, limited-use abilities, and hit dice (server-side), and clears any recorded death saves",
     {
       characterId: z.coerce.number().describe("The character ID"),
     },

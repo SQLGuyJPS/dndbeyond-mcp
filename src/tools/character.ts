@@ -1655,20 +1655,50 @@ export async function longRest(
   // Restored 2026-09-06 (Phase 0 P9): POST-with-body, not GET-with-query. The old
   // GET call returned a plausible 200 but never actually persisted the reset — a
   // silent false success, confirmed live via independent read-back. Server-side
-  // long rest handles all resets atomically: HP, spell slots, pact magic,
-  // limited-use abilities, hit dice, death saves.
+  // long rest DOES atomically handle HP, spell slots, pact magic, limited-use
+  // abilities and hit dice — confirmed live via the response body's own echoed
+  // state plus an independent read-back (P9). It does NOT touch death saves: this
+  // was assumed (not tested) when this comment was first written, and post-release
+  // validation on 2026-09-07/08 found the assumption wrong — the rest/long response
+  // carries no `deathSaves` field, and an independent read-back after a rest that
+  // fully restored HP showed death saves unchanged. Per 5e rules, regaining any HP
+  // clears death saves, so a long rest that restores HP to max unambiguously should.
+  // Fixed here with an explicit follow-up clear, skipped when there's nothing to
+  // clear so a character with no death saves recorded doesn't take an extra write.
   // Ported-From: grahamethompson/dndbeyond-mcp
+  const before = await client.get<DdbCharacter>(
+    ENDPOINTS.character.get(params.characterId),
+    `character:${params.characterId}`,
+    60_000
+  );
+
   await client.post<unknown>(
     ENDPOINTS.character.rest.long(),
     { characterId: params.characterId, resetMaxHpModifier: true, adjustConditionLevel: false }
   );
   client.invalidateCache(`character:${params.characterId}`);
 
+  // Only reached if the rest POST above resolved (didn't throw) — never clear
+  // death saves speculatively off a failed rest.
+  const hadDeathSaves = (before.deathSaves?.successCount ?? 0) > 0 || (before.deathSaves?.failCount ?? 0) > 0;
+  if (hadDeathSaves) {
+    await client.put(
+      ENDPOINTS.character.updateDeathSaves(),
+      { characterId: params.characterId, successCount: 0, failCount: 0 },
+      [`character:${params.characterId}`]
+    );
+  }
+
+  let text = `Long rest completed for character ${params.characterId}. All HP, spell slots, and long-rest abilities have been restored.`;
+  if (hadDeathSaves) {
+    text += " Death saves cleared.";
+  }
+
   return {
     content: [
       {
         type: "text",
-        text: `Long rest completed for character ${params.characterId}. All HP, spell slots, and long-rest abilities have been restored.`,
+        text,
       },
     ],
   };
@@ -1683,6 +1713,15 @@ export async function shortRest(
   // current hit-dice-used count in the body (classHitDiceUsed, keyed by the
   // class-mapping id — classes[].id, not definition.id — confirmed live), which a
   // bodyless GET could never have conveyed correctly for a multiclass character.
+  //
+  // Deliberately does NOT clear death saves, unlike longRest. Per 5e rules, death
+  // saves only clear on regaining HP, and this tool's short rest never restores
+  // HP on its own (it tracks spent hit dice only — this MCP has no hit-dice-spend-
+  // for-healing path yet). Confirmed live 2026-09-08: a short rest on a damaged,
+  // death-save-tracking fixture left both removedHitPoints and deathSaves
+  // unchanged (see docs/plans/2026-09-05-character-fixes-integration-plan.md,
+  // "Post-release validation" follow-up). If a future change adds HP restoration
+  // to short rest, this decision needs revisiting.
   // Ported-From: grahamethompson/dndbeyond-mcp
   const character = await client.get<DdbCharacter>(
     ENDPOINTS.character.get(params.characterId),

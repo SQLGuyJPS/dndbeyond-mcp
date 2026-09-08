@@ -180,6 +180,59 @@ describe("Live: Write endpoints (v0.8.0)", () => {
     const restedArr = Array.isArray(rested.pactMagic) ? rested.pactMagic : [];
     expect(restedArr.every((row) => row.used === 0)).toBe(true);
   });
+
+  /**
+   * Post-release validation (2026-09-07/08, docs/plans/2026-09-05-character-fixes-
+   * integration-plan.md, "Post-release validation" section): longRest's own
+   * comment claimed the server-side reset clears death saves atomically, but an
+   * independent read-back showed them unchanged after a rest that fully restored
+   * HP. Per 5e rules, regaining any HP clears death saves — asserted here via
+   * independent read-back, not the rest call's own response text, per Threat C.
+   */
+  it("longRest clears death saves after restoring HP, confirmed by an independent read-back (item 6 follow-up)", async () => {
+    await updateDeathSaves(client, { characterId: f1Id, type: "success", count: 1 });
+    await updateDeathSaves(client, { characterId: f1Id, type: "failure", count: 1 });
+    await updateHp(client, { characterId: f1Id, hpChange: -1 });
+
+    const damaged = await fetchCharacterState(client, f1Id);
+    expect(damaged.deathSaves.successCount).toBe(1);
+    expect(damaged.deathSaves.failCount).toBe(1);
+    expect(damaged.removedHitPoints).toBeGreaterThan(0);
+
+    const result = await longRest(client, { characterId: f1Id });
+    expect(result.content[0].text).toContain("Death saves cleared.");
+
+    const rested = await fetchCharacterState(client, f1Id);
+    expect(rested.removedHitPoints).toBe(0);
+    expect(rested.deathSaves.successCount).toBe(0);
+    expect(rested.deathSaves.failCount).toBe(0);
+  });
+
+  /**
+   * Short rest deliberately does NOT clear death saves — unlike longRest, it
+   * never restores HP on its own (only hit-dice-used tracking), so per 5e rules
+   * death saves have no trigger to clear. This locks in the asymmetry so nobody
+   * "fixes" shortRest to match longRest without re-probing first.
+   */
+  it("shortRest does not clear death saves, since it doesn't restore HP (item 6 follow-up)", async () => {
+    await updateDeathSaves(client, { characterId: f2Id, type: "success", count: 1 });
+    await updateDeathSaves(client, { characterId: f2Id, type: "failure", count: 1 });
+
+    const before = await fetchCharacterState(client, f2Id);
+    expect(before.deathSaves.successCount).toBe(1);
+    expect(before.deathSaves.failCount).toBe(1);
+
+    const result = await shortRest(client, { characterId: f2Id });
+    expect(result.content[0].text).not.toContain("Death saves cleared");
+
+    const after = await fetchCharacterState(client, f2Id);
+    expect(after.deathSaves.successCount).toBe(1);
+    expect(after.deathSaves.failCount).toBe(1);
+
+    // Reset
+    await updateDeathSaves(client, { characterId: f2Id, type: "success", count: 0 });
+    await updateDeathSaves(client, { characterId: f2Id, type: "failure", count: 0 });
+  });
 });
 
 /**
