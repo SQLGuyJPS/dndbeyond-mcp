@@ -346,6 +346,66 @@ describe("loadAllClassFeatures pre-fan-out narrowing (B1)", () => {
   });
 });
 
+// Regression coverage for the PR #12 review finding: a `className` that
+// substring-matches the wrong base class used to narrow the fan-out to that
+// class alone and silently drop every other class's subclass features —
+// even ones the composite-name filter further down would have matched.
+// Fixture mirrors the reviewer's repro exactly: Warlock's own name contains
+// "war"; Cleric doesn't, but owns a "War Domain" subclass.
+describe("loadAllClassFeatures exact-vs-substring className narrowing (PR #12 review)", () => {
+  const WARLOCK = {
+    id: 9001, name: "Warlock", description: "A warlock.", hitDice: 8, isHomebrew: false,
+    spellCastingAbilityId: 6, sources: [{ sourceId: 145 }],
+    classFeatures: [{ id: 900, name: "Eldritch Invocations", description: "Learn eldritch invocations.", requiredLevel: 2 }],
+  };
+  const CLERIC = {
+    id: 9002, name: "Cleric", description: "A cleric.", hitDice: 8, isHomebrew: false,
+    spellCastingAbilityId: 5, sources: [{ sourceId: 145 }],
+    classFeatures: [{ id: 901, name: "Channel Divinity", description: "Channel divine energy.", requiredLevel: 2 }],
+  };
+  const WAR_DOMAIN = {
+    id: 9010, name: "War Domain", description: "<p>A domain of war.</p>", parentClassId: 9002,
+    spellCastingAbilityId: 5, sources: [{ sourceId: 145 }],
+    classFeatures: [
+      { id: 901, name: "Channel Divinity", description: "Channel divine energy.", requiredLevel: 2 }, // merged base feature
+      { id: 950, name: "War Priest", description: "Smite as a bonus action.", requiredLevel: 1 }, // subclass-only
+    ],
+  };
+
+  function warClient(): DdbClient {
+    return {
+      get: vi.fn().mockImplementation(async (url: string) => {
+        if (url === ENDPOINTS.gameData.classes()) return [WARLOCK, CLERIC];
+        if (url === ENDPOINTS.gameData.subclasses(WARLOCK.id)) return [];
+        if (url === ENDPOINTS.gameData.subclasses(CLERIC.id)) return [WAR_DOMAIN];
+        throw new Error(`Unexpected URL in mock: ${url}`);
+      }),
+      getRaw: vi.fn().mockResolvedValue(MOCK_CONFIG),
+    } as unknown as DdbClient;
+  }
+
+  it("a className that substring-matches one class's base name still surfaces another class's matching subclass", async () => {
+    const result = await searchClassFeatures(warClient(), { className: "War" });
+    const text = result.content[0].text;
+    // Pre-fix: this used to narrow to Warlock alone (base name substring-
+    // matches "war"), never fetch Cleric's subclasses, and drop War Priest.
+    expect(text).toContain("War Priest"); // Cleric (War Domain) — must not be dropped
+    expect(text).toContain("Eldritch Invocations"); // Warlock
+  });
+
+  it("an exact className match still narrows the fan-out to that class alone", async () => {
+    const client = warClient();
+    const result = await searchClassFeatures(client, { className: "Warlock" });
+    const text = result.content[0].text;
+    expect(text).toContain("Eldritch Invocations");
+    expect(text).not.toContain("War Priest");
+
+    const calledUrls = (client.get as ReturnType<typeof vi.fn>).mock.calls.map((c: unknown[]) => c[0]);
+    expect(calledUrls).toContain(ENDPOINTS.gameData.subclasses(WARLOCK.id));
+    expect(calledUrls).not.toContain(ENDPOINTS.gameData.subclasses(CLERIC.id)); // Cleric — must not be fetched
+  });
+});
+
 describe("searchClassFeatures", () => {
   it("finds subclass features by name alone, without className", async () => {
     const result = await searchClassFeatures(mockClient(), { name: "Glorious Defense" });
