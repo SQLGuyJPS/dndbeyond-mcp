@@ -13,8 +13,29 @@ import type {
 } from "../types/character.js";
 import type { DdbCampaign, DdbCampaignCharacter2 } from "../types/api.js";
 import { fuzzyMatch, levenshteinDistance } from "../utils/fuzzy-match.js";
-import { ABILITY_NAMES, ABILITY_SUBTYPE_MAP, calculateAbilityModifier, sumModifierBonuses, computeFinalAbilityScore, computeLevel, calculateMaxHp, calculateCurrentHp, calculateAc } from "../utils/character-calculations.js";
+import {
+  ABILITY_NAMES,
+  calculateAbilityModifier,
+  abilityModifierNumeric,
+  sumModifierBonuses,
+  computeCharacterAbilityScore,
+  computeLevel,
+  calculateProficiencyBonus,
+  calculateMaxHp,
+  calculateCurrentHp,
+  calculateAc,
+  hasModifierBySubType,
+  SAVING_THROW_SUBTYPES,
+  getSavingThrowTotal,
+  getSkillTotal,
+  getSpellSaveDcBonus,
+  getSpeeds,
+  getInitiative,
+  getPassiveScore,
+  getSenses,
+} from "../utils/character-calculations.js";
 import { getPactMagicState, buildPactMagicUpdateBody } from "../utils/character-spell-slots.js";
+import { getCharacterSpellEntries, formatSpellAnnotation } from "../utils/character-spells.js";
 
 interface GetCharacterParams {
   characterId?: number;
@@ -33,7 +54,7 @@ type ToolResult = { content: Array<{ type: "text"; text: string }> };
 function formatAbilityScores(char: DdbCharacter): string {
   return ABILITY_NAMES.map((name, idx) => {
     const id = idx + 1;
-    const score = computeFinalAbilityScore(char.stats, char.bonusStats, char.overrideStats, char.modifiers, id);
+    const score = computeCharacterAbilityScore(char, id);
     const modifier = calculateAbilityModifier(score);
     return `${name}: ${score} (${modifier})`;
   }).join(" | ");
@@ -56,27 +77,34 @@ function formatHp(char: DdbCharacter): string {
   return temp > 0 ? `${current}/${max} (+${temp} temp)` : `${current}/${max}`;
 }
 
+// Item 8 (v0.9.0): replaces the old prepared-only view. Confirmed live
+// 2026-09-09 that a `prepared: false, alwaysPrepared: false` spell is very
+// often still real and castable — racial/feat/item at-will and limited-use
+// spells, and Warlock invocation-granted spells, all look exactly like an
+// unprepared "known but not chosen today" spell in the raw data. Showing
+// every entry with its source(s) and casting mode, rather than silently
+// dropping anything not flagged prepared, is the fix — see
+// character-spells.ts. Header renamed from "Prepared Spells" to "Spells"
+// since the list is no longer prepared-only.
 function formatSpells(char: DdbCharacter): string {
-  const allSpells = getAllSpells(char);
+  const entries = getCharacterSpellEntries(char);
+  if (entries.length === 0) return StringUtils.EMPTY;
 
-  if (allSpells.length === 0) return StringUtils.EMPTY;
-
-  const prepared = allSpells.filter((s) => s.prepared || s.alwaysPrepared);
-  const preparedByLevel = prepared.reduce((acc, spell) => {
-    const level = spell.definition.level;
+  const byLevel = entries.reduce((acc, entry) => {
+    const level = entry.spell.definition.level;
     if (!acc[level]) acc[level] = [];
-    acc[level].push(spell.definition.name);
+    acc[level].push(formatSpellAnnotation(entry));
     return acc;
   }, {} as Record<number, string[]>);
 
-  const lines = Object.entries(preparedByLevel)
+  const lines = Object.entries(byLevel)
     .sort(([a], [b]) => Number(a) - Number(b))
     .map(([level, spells]) => {
       const levelLabel = level === "0" ? "Cantrips" : `Level ${level}`;
-      return `  ${levelLabel}: ${spells.join(", ")}`;
+      return `  ${levelLabel}: ${spells.sort().join(", ")}`;
     });
 
-  return `\nPrepared Spells:\n${lines.join("\n")}`;
+  return `\nSpells:\n${lines.join("\n")}`;
 }
 
 function formatInventory(char: DdbCharacter): string {
@@ -95,14 +123,13 @@ function formatInventory(char: DdbCharacter): string {
 // UTILITY FUNCTIONS
 // ============================================================================
 
+// Item 8 (v0.9.0): now sourced from getCharacterSpellEntries, which also
+// merges in `classSpells` — confirmed live to carry spells (invocation-
+// granted ones observed) absent from spells.class entirely. Callers that
+// only need "does this character have any spells" or "find a spell by
+// name" (search_definitions) get the complete set as a result.
 function getAllSpells(char: DdbCharacter): DdbSpell[] {
-  return [
-    ...(char.spells.class ?? []),
-    ...(char.spells.race ?? []),
-    ...(char.spells.background ?? []),
-    ...(char.spells.item ?? []),
-    ...(char.spells.feat ?? []),
-  ];
+  return getCharacterSpellEntries(char).map((entry) => entry.spell);
 }
 
 function stripHtml(s: string | null | undefined): string {
@@ -147,16 +174,12 @@ function featureDescription(f: DdbClassFeature): string {
   return f.definition?.description ?? f.description ?? "";
 }
 
-function calculateProficiencyBonus(level: number): number {
-  return Math.ceil(level / 4) + 1;
-}
-
 function getAbilityScoreNumeric(char: DdbCharacter, id: number): number {
-  return computeFinalAbilityScore(char.stats, char.bonusStats, char.overrideStats, char.modifiers, id);
+  return computeCharacterAbilityScore(char, id);
 }
 
 function getAbilityModNumeric(char: DdbCharacter, id: number): number {
-  return Math.floor((getAbilityScoreNumeric(char, id) - 10) / 2);
+  return abilityModifierNumeric(getAbilityScoreNumeric(char, id));
 }
 
 // ============================================================================
@@ -170,15 +193,6 @@ const ABILITY_FULL_NAMES: Record<number, string> = {
   4: "Intelligence",
   5: "Wisdom",
   6: "Charisma",
-};
-
-const SAVING_THROW_SUBTYPES: Record<number, string> = {
-  1: "strength-saving-throws",
-  2: "dexterity-saving-throws",
-  3: "constitution-saving-throws",
-  4: "intelligence-saving-throws",
-  5: "wisdom-saving-throws",
-  6: "charisma-saving-throws",
 };
 
 const SKILL_DEFINITIONS: Array<{ name: string; abilityId: number; subType: string }> = [
@@ -202,28 +216,17 @@ const SKILL_DEFINITIONS: Array<{ name: string; abilityId: number; subType: strin
   { name: "Survival", abilityId: 5, subType: "survival" },
 ];
 
-function hasModifierBySubType(
-  modifiers: Record<string, DdbModifier[]>,
-  subType: string,
-  type: string
-): boolean {
-  for (const list of Object.values(modifiers)) {
-    if (!Array.isArray(list)) continue;
-    for (const mod of list) {
-      if (mod.subType === subType && mod.type === type) return true;
-    }
-  }
-  return false;
-}
-
+// Item 10 (v0.9.0): saves and skills now include generic bonus subtypes
+// (`saving-throws`/per-ability for saves, `ability-checks`/per-skill for
+// skills) via getSavingThrowTotal/getSkillTotal — confirmed live 2026-09-09
+// that a Stone of Good Luck's `bonus ability-checks +1` was silently
+// excluded from every skill total. Ported-From: grahamethompson/dndbeyond-mcp
 function formatSavingThrows(char: DdbCharacter): string {
-  const profBonus = calculateProficiencyBonus(computeLevel(char));
   const saves = [];
 
   for (let id = 1; id <= 6; id++) {
-    const mod = getAbilityModNumeric(char, id);
     const proficient = hasModifierBySubType(char.modifiers, SAVING_THROW_SUBTYPES[id], "proficiency");
-    const total = mod + (proficient ? profBonus : 0);
+    const total = getSavingThrowTotal(char, id);
     const sign = total >= 0 ? "+" : "";
     const prof = proficient ? " *" : "";
     saves.push(`${ABILITY_NAMES[id - 1]}: ${sign}${total}${prof}`);
@@ -233,23 +236,11 @@ function formatSavingThrows(char: DdbCharacter): string {
 }
 
 function formatSkills(char: DdbCharacter): string {
-  const profBonus = calculateProficiencyBonus(computeLevel(char));
-
   const lines = SKILL_DEFINITIONS.map((skill) => {
-    const abilityMod = getAbilityModNumeric(char, skill.abilityId);
     const proficient = hasModifierBySubType(char.modifiers, skill.subType, "proficiency");
     const expertise = hasModifierBySubType(char.modifiers, skill.subType, "expertise");
-
-    let total = abilityMod;
-    let marker = "";
-    if (expertise) {
-      total += profBonus * 2;
-      marker = " **";
-    } else if (proficient) {
-      total += profBonus;
-      marker = " *";
-    }
-
+    const total = getSkillTotal(char, skill.abilityId, skill.subType);
+    const marker = expertise ? " **" : proficient ? " *" : "";
     const sign = total >= 0 ? "+" : "";
     return `  ${skill.name}: ${sign}${total}${marker}`;
   });
@@ -339,16 +330,20 @@ function formatSpellcasting(char: DdbCharacter): string {
   if (spellcastingClasses.length === 0) {
     // Fallback to WIS if no known spellcasting class
     const wisMod = getAbilityModNumeric(char, 5);
-    const spellSaveDC = 8 + profBonus + wisMod;
+    const dcBonus = sumModifierBonuses(char.modifiers, "spell-save-dc");
+    const spellSaveDC = 8 + profBonus + wisMod + dcBonus;
     const spellAttack = profBonus + wisMod;
     const attackSign = spellAttack >= 0 ? "+" : "";
     return `Spell Save DC: ${spellSaveDC} | Spell Attack: ${attackSign}${spellAttack}`;
   }
 
+  // Item 10 (v0.9.0): adds `spell-save-dc` + `${classSlug}-spell-save-dc`
+  // generic bonuses, which the flat `8 + prof + mod` formula skipped entirely.
   const dcStrings = spellcastingClasses.map(cls => {
     const abilityId = SPELLCASTING_ABILITY[cls.definition.name] ?? 5;
     const abilityMod = getAbilityModNumeric(char, abilityId);
-    const spellSaveDC = 8 + profBonus + abilityMod;
+    const dcBonus = getSpellSaveDcBonus(char, cls.definition.name);
+    const spellSaveDC = 8 + profBonus + abilityMod + dcBonus;
     const spellAttack = profBonus + abilityMod;
     const attackSign = spellAttack >= 0 ? "+" : "";
 
@@ -442,17 +437,55 @@ function formatRacialTraitNames(char: DdbCharacter): string {
   return traits.map((t) => t.definition.name).join(", ");
 }
 
+// Item 12 (v0.9.0): real per-race speeds via race.weightSpeeds, plus every
+// nonzero movement type. Confirmed live 2026-09-09 that the hardcoded 30 ft
+// happened to be correct for every character this account owns (Human, Elf,
+// Dwarf, Dragonborn — none of which differ from 30 ft in 2024 rules), which
+// is exactly why the bug went unnoticed; a 25 ft or 35 ft species still
+// needs a synthetic unit-test fixture (see tests/utils/character-calculations.test.ts).
 function formatSpeed(char: DdbCharacter): string {
-  // Base walking speed for most races is 30 ft
-  let baseSpeed = 30;
+  const speeds = getSpeeds(char);
+  const parts = [`${speeds.walk} ft`];
+  if (speeds.fly > 0) parts.push(`Fly ${speeds.fly} ft`);
+  if (speeds.swim > 0) parts.push(`Swim ${speeds.swim} ft`);
+  if (speeds.climb > 0) parts.push(`Climb ${speeds.climb} ft`);
+  if (speeds.burrow > 0) parts.push(`Burrow ${speeds.burrow} ft`);
+  return `Speed: ${parts.join(", ")}`;
+}
 
-  // Check modifiers for speed bonuses
-  let speedBonus = sumModifierBonuses(char.modifiers, "speed");
-  speedBonus += sumModifierBonuses(char.modifiers, "unarmored-movement");
-  speedBonus += sumModifierBonuses(char.modifiers, "innate-speed-walking");
+function formatInitiative(char: DdbCharacter): string {
+  const initiative = getInitiative(char);
+  const sign = initiative >= 0 ? "+" : "";
+  return `Initiative: ${sign}${initiative}`;
+}
 
-  const totalSpeed = baseSpeed + speedBonus;
-  return `Speed: ${totalSpeed} ft`;
+const PASSIVE_SKILLS: Array<{ label: string; abilityId: number; subType: string }> = [
+  { label: "Passive Perception", abilityId: 5, subType: "perception" },
+  { label: "Passive Insight", abilityId: 5, subType: "insight" },
+  { label: "Passive Investigation", abilityId: 4, subType: "investigation" },
+];
+
+function formatPassiveScores(char: DdbCharacter): string {
+  const parts = PASSIVE_SKILLS.map(
+    (p) => `${p.label}: ${getPassiveScore(char, p.abilityId, p.subType)}`
+  );
+  return parts.join(" | ");
+}
+
+const SENSE_LABELS: Record<string, string> = {
+  darkvision: "Darkvision",
+  blindsight: "Blindsight",
+  tremorsense: "Tremorsense",
+  truesight: "Truesight",
+};
+
+function formatSenses(char: DdbCharacter): string {
+  const senses = getSenses(char);
+  const entries = Object.entries(senses);
+  if (entries.length === 0) return StringUtils.EMPTY;
+
+  const lines = entries.map(([subType, value]) => `${SENSE_LABELS[subType] ?? subType} ${value} ft`);
+  return `\n--- Senses ---\n${lines.join(", ")}`;
 }
 
 function formatSpellSlots(char: DdbCharacter): string {
@@ -615,6 +648,7 @@ function formatCharacterSheet(char: DdbCharacter): string {
     `HP: ${formatHp(char)}`,
     `AC: ${calculateAc(char)}`,
     formatSpeed(char),
+    formatInitiative(char),
     StringUtils.EMPTY,
     `--- Ability Scores ---`,
     formatAbilityScores(char),
@@ -624,7 +658,14 @@ function formatCharacterSheet(char: DdbCharacter): string {
     StringUtils.EMPTY,
     `--- Skills (* = proficient, ** = expertise) ---`,
     formatSkills(char),
+    StringUtils.EMPTY,
+    `--- Passive Scores ---`,
+    formatPassiveScores(char),
   ];
+
+  // Add senses display (item 12 — only shown when a sense is present)
+  const senses = formatSenses(char);
+  if (senses) sections.push(senses.trim());
 
   // Add proficiencies display (after skills, before spellcasting)
   const proficiencies = formatProficiencies(char);
@@ -902,11 +943,10 @@ function formatCharacterFull(char: DdbCharacter): string {
   const sheet = formatCharacterSheet(char);
   const definitionSections: string[] = [];
 
-  // Spells
+  // Spells (item 8: every available spell, not just currently-prepared ones — see formatSpells)
   const allSpells = getAllSpells(char);
-  const preparedSpells = allSpells.filter((s) => s.prepared || s.alwaysPrepared);
-  if (preparedSpells.length > 0) {
-    const spellDefs = preparedSpells
+  if (allSpells.length > 0) {
+    const spellDefs = allSpells
       .sort((a, b) => a.definition.level - b.definition.level || a.definition.name.localeCompare(b.definition.name))
       .map((s) => formatSpellDefinition(s));
     definitionSections.push(`\n=== Spell Definitions ===\n\n${spellDefs.join("\n\n---\n\n")}`);

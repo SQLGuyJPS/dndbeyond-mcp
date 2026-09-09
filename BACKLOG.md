@@ -59,6 +59,18 @@ Roughly priority-ordered. This is the current tracking doc — `AUDIT.md` (2026-
   that plan (which is about `set`-type *modifiers* being ignored, not the base value write itself for
   one specific input mode). Not yet triaged for a fix.
 
+## Read-tool correctness
+
+- **`findCharacterByName`'s Levenshtein fallback has no maximum-distance/similarity-ratio guard** —
+  found live 2026-09-09 while gathering v0.9.0 fixtures: searching `characterName: "Niko"` against an
+  account with no character named Niko silently returned an unrelated character ("Duo", edit distance 3)
+  instead of "not found." Worse than item 7's campaign-less-characters gap (`docs/plans/2026-09-05-
+  character-fixes-integration-plan.md`, v0.10.0) — that one is *silent absence*, this is *silent wrong
+  answer* with no error a caller could detect. The `<= 3` absolute-distance threshold in
+  `findCharacterByName`/`getCharacter` (`src/tools/character.ts`) needs a length-relative cutoff (e.g. a
+  maximum distance-to-length ratio) so a short query can't fuzzy-match an unrelated short name. Worth
+  fixing alongside v0.10.0's item 7 rework, which touches the same function. Not fixed this session.
+
 ## Low / cleanup
 
 - **`setup/auth-flow.ts`** — the 5-min timeout `reject`s but never `clearInterval`; the async poll keeps
@@ -113,3 +125,45 @@ apologetic error message, not a decommissioned API — see `v0.8.0` below.*
   handled it atomically — live-verified the rest endpoint's response carries no `deathSaves` field, and
   death saves survived a long rest that fully restored HP. `long_rest` now explicitly clears them when
   nonzero, after the rest itself succeeds; `short_rest` is confirmed (not assumed) to leave them untouched.
+
+## v0.9.0 — character-sheet correctness (implemented and unit-tested 2026-09-09; not yet released)
+
+Items 1, 3, 2, 10, 12, 8 of `docs/plans/2026-09-05-character-fixes-integration-plan.md`. Item 4 (hybrid
+2024-background ASI double-counting) is **deferred** — its fixture (M3) wasn't built this session; pick
+it up alongside PR 9 once M3 exists. All fixes below are confirmed against real live payloads (not just
+mocks) captured 2026-09-09 — see the plan's "v0.9.0 progress" section for the worked comparisons.
+
+- **`calculateMaxHp` ignored Constitution entirely** — `baseHitPoints` is pre-CON; every character above
+  level 1 with a nonzero CON mod got the wrong max HP (confirmed live: one character was undercounted by
+  24 HP). Now adds `conMod * level` plus flat/per-level HP modifiers (e.g. the Tough feat).
+- **`set`-type ability-score modifiers were invisible** (Belt of Hill Giant Strength and similar) —
+  `computeFinalAbilityScore` only ever summed `type: "bonus"` modifiers. Confirmed live: a character
+  wearing the belt displayed STR 12 (her unmodified score), not 21. New `computeCharacterAbilityScore`
+  takes the max of the natural score and any matching `set` modifier.
+- **AC: three independent bugs.** (1) Shield/armor detection was string-only; every shield on every real
+  character examined had an empty `type` string and was silently skipped (shield bonus never applied) —
+  now prefers the numeric `armorTypeId`. (2) Unarmored AC hardcoded barbarian/monk by class name and
+  missed everything else (natural armor, homebrew formulas); now builds a candidate list from any `set`-
+  type `unarmored-armor-class` modifier and takes the max, honoring `ignore: unarmored-dex-ac-bonus` and
+  `ac-max-dex-modifier`. (3) `armored-armor-class`/`unarmored-armor-class` *bonus* modifiers applied
+  unconditionally regardless of armor state; now gated correctly. A weapon literally named "Crossbow,
+  Light" was also found to false-match a naive `.includes("light")` fallback and get misclassified as
+  light armor — fixed by gating the string fallback on the item plausibly being armor at all.
+- **Saves/skills/spell DC skipped generic bonus subtypes** — confirmed live: a Luckstone's `ability-checks
+  +1` was excluded from every skill total. Now includes `saving-throws`/`ability-checks`/`spell-save-dc`
+  (plus their per-ability/skill/class variants).
+- **Speed was hardcoded to 30 ft; no initiative, passives, or senses** — now reads
+  `race.weightSpeeds.normal` for real per-race speed, and adds Initiative, three passive scores, and
+  nonzero senses (darkvision confirmed live via a `set-base` modifier).
+- **Spells with `prepared: false` were silently dropped** — confirmed live on a real Warlock: racial
+  at-will cantrips, a feat's 1/long-rest spell, and most invocation-granted spells (including the
+  warlock's own Eldritch Blast) were completely invisible. New `getCharacterSpellEntries` merges all five
+  `spells.*` collections plus the previously-unmodeled `classSpells`, surfacing every spell with its
+  source(s) and casting mode. Header renamed "Prepared Spells" → "Spells".
+
+**Unplanned finding, fixed alongside the above:** `sumModifierBonuses` only read `mod.value`, but some
+modifiers (confirmed live: an item's flat HP bonus) carry the real number in `fixedValue` with `value:
+null`. Now falls back to `fixedValue`.
+
+**Not fixed this session, found while capturing v0.9.0 fixtures:** see "Read-tool correctness" above for
+the Levenshtein fuzzy-match false-positive.

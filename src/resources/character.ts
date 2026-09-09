@@ -4,12 +4,13 @@ import { ENDPOINTS } from "../api/endpoints.js";
 import type { DdbCharacter } from "../types/character.js";
 import type { DdbCampaign, DdbCampaignCharacter2 } from "../types/api.js";
 import { HttpError } from "../resilience/index.js";
-import { ABILITY_NAMES, calculateAbilityModifier, computeFinalAbilityScore, computeLevel, calculateMaxHp, calculateCurrentHp, calculateAc } from "../utils/character-calculations.js";
+import { ABILITY_NAMES, calculateAbilityModifier, computeCharacterAbilityScore, computeLevel, calculateMaxHp, calculateCurrentHp, calculateAc } from "../utils/character-calculations.js";
+import { getCharacterSpellEntries, formatSpellAnnotation } from "../utils/character-spells.js";
 
 function formatAbilityScores(char: DdbCharacter): string {
   return ABILITY_NAMES.map((name, idx) => {
     const id = idx + 1;
-    const score = computeFinalAbilityScore(char.stats, char.bonusStats, char.overrideStats, char.modifiers, id);
+    const score = computeCharacterAbilityScore(char, id);
     const modifier = calculateAbilityModifier(score);
     return `${name}: ${score} (${modifier})`;
   }).join(" | ");
@@ -50,33 +51,27 @@ function formatCharacter(char: DdbCharacter): string {
   return sections.join("\n");
 }
 
+// Item 8 (v0.9.0): same provenance-aware merge as tools/character.ts's
+// formatSpells — see character-spells.ts.
 function formatSpellList(char: DdbCharacter): string {
-  const allSpells = [
-    ...(char.spells.class ?? []),
-    ...(char.spells.race ?? []),
-    ...(char.spells.background ?? []),
-    ...(char.spells.item ?? []),
-    ...(char.spells.feat ?? []),
-  ];
+  const entries = getCharacterSpellEntries(char);
+  if (entries.length === 0) return "No spells available.";
 
-  if (allSpells.length === 0) return "No spells available.";
-
-  const prepared = allSpells.filter((s) => s.prepared || s.alwaysPrepared);
-  const preparedByLevel = prepared.reduce((acc, spell) => {
-    const level = spell.definition.level;
+  const byLevel = entries.reduce((acc, entry) => {
+    const level = entry.spell.definition.level;
     if (!acc[level]) acc[level] = [];
-    acc[level].push(spell.definition.name);
+    acc[level].push(formatSpellAnnotation(entry));
     return acc;
   }, {} as Record<number, string[]>);
 
   const lines = [
-    `Prepared Spells for ${char.name}:`,
+    `Spells for ${char.name}:`,
     "",
-    ...Object.entries(preparedByLevel)
+    ...Object.entries(byLevel)
       .sort(([a], [b]) => Number(a) - Number(b))
       .map(([level, spells]) => {
         const levelLabel = level === "0" ? "Cantrips" : `Level ${level}`;
-        return `${levelLabel}:\n  ${spells.join(", ")}`;
+        return `${levelLabel}:\n  ${spells.sort().join(", ")}`;
       }),
   ];
 

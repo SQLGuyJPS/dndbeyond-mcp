@@ -45,6 +45,15 @@ export interface DdbCharacter {
     available: number;
   }>;
   hitDiceUsed?: number;
+  // Confirmed live 2026-09-09 (Warlock Test): a per-class collection separate
+  // from spells.class, carrying spells (often the same ones, plus
+  // invocation/pact-granted at-will spells) that spells.class's `prepared`/
+  // `alwaysPrepared` flags don't always mark. See getCharacterSpellEntries()
+  // in character-spells.ts (item 8).
+  classSpells?: Array<{
+    characterClassId: number;
+    spells: DdbSpell[];
+  }>;
 }
 
 export interface DdbRace {
@@ -52,6 +61,18 @@ export interface DdbRace {
   baseRaceName: string;
   isHomebrew: boolean;
   racialTraits: DdbRacialTrait[];
+  // Confirmed live 2026-09-09 — real per-race movement speeds. The old code
+  // hardcoded every character to 30 ft; see getSpeeds() in
+  // character-calculations.ts.
+  weightSpeeds?: {
+    normal?: {
+      walk?: number;
+      fly?: number;
+      burrow?: number;
+      swim?: number;
+      climb?: number;
+    } | null;
+  } | null;
 }
 
 export interface DdbClass {
@@ -104,6 +125,11 @@ export interface DdbSpellsContainer {
 export interface DdbSpell {
   id: number;
   definition: {
+    // The spell-definition ID (stable across every source/character that
+    // grants this spell) — distinct from the top-level `id`, which is a
+    // per-grant instance ID and differs even for the same spell granted
+    // twice. Dedup by `definition.id`, not `id`. Confirmed live 2026-09-09.
+    id?: number;
     name: string;
     level: number;
     school: string;
@@ -133,6 +159,11 @@ export interface DdbSpell {
   prepared: boolean;
   alwaysPrepared: boolean;
   usesSpellSlot: boolean;
+  // Confirmed live 2026-09-09: an at-will/limited-use racial, feat, or item
+  // spell (e.g. Tiefling's Hellish Rebuke, Magic Initiate's 1/long-rest
+  // spell) carries this even though `prepared`/`alwaysPrepared` are both
+  // false. See getCharacterSpellEntries() in character-spells.ts (item 8).
+  limitedUse?: DdbLimitedUse | null;
 }
 
 export interface DdbInventoryItem {
@@ -147,6 +178,10 @@ export interface DdbInventoryItem {
     isHomebrew: boolean;
     armorClass?: number | null;
     filterType?: string;
+    // Confirmed live 2026-09-09: 1=light, 2=medium, 3=heavy, 4=shield. Every
+    // shield observed live carries this even when `type`/`filterType` are
+    // empty/null — see findArmorTypeId() in character-calculations.ts.
+    armorTypeId?: number | null;
   };
   equipped: boolean;
   quantity: number;
@@ -192,6 +227,15 @@ export interface DdbModifier {
   type: string;
   subType: string;
   value: number | null;
+  // Confirmed live 2026-09-09: some modifiers (item-granted flat bonuses, and
+  // every `set`/`set-base` modifier observed) carry the real number here
+  // instead of — or in addition to — `value`. Read both (see
+  // character-calculations.ts's modifierValue()) rather than `value` alone.
+  fixedValue?: number | null;
+  // Present on `set`/`set-base` modifiers that scale off an ability score
+  // (e.g. natural armor's "13 + CON mod": value=3, statId=3). Absent
+  // (null/undefined) on modifiers with no ability-score component.
+  statId?: number | null;
   friendlyTypeName: string;
   friendlySubtypeName: string;
   componentId: number;

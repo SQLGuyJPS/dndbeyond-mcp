@@ -132,9 +132,10 @@ describe("updateHp", () => {
       hpChange: -100,
     });
 
+    // maxHp = 40 base + 5 bonus + 2 (CON mod) * 5 (level) = 55 (item 1, v0.9.0)
     expect(mockClient.put).toHaveBeenCalledWith(
       expect.anything(),
-      { characterId: 123, removedHitPoints: 45, temporaryHitPoints: 0 },
+      { characterId: 123, removedHitPoints: 55, temporaryHitPoints: 0 },
       expect.anything()
     );
   });

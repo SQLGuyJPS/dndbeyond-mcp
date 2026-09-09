@@ -297,7 +297,20 @@ describe("AC Calculation", () => {
         },
       ],
       inventory: [],
-      modifiers: { race: [], class: [], background: [], item: [], feat: [], condition: [] },
+      // Barbarian's Unarmored Defense, real shape confirmed live 2026-09-09:
+      // a `set unarmored-armor-class` modifier with `statId: 3` (CON) and a
+      // null flat value. Item 2 (v0.9.0) reads this generically rather than
+      // hardcoding "isBarbarian" by class name.
+      modifiers: {
+        race: [], background: [], item: [], feat: [], condition: [],
+        class: [
+          {
+            id: 1, type: "set", subType: "unarmored-armor-class", value: null, statId: 3,
+            friendlyTypeName: "Set", friendlySubtypeName: "Unarmored Armor Class",
+            componentId: 1, componentTypeId: 1,
+          },
+        ],
+      },
       spells: { race: [], class: [], background: [], item: [], feat: [] },
     };
 
@@ -324,7 +337,17 @@ describe("AC Calculation", () => {
         },
       ],
       inventory: [],
-      modifiers: { race: [], class: [], background: [], item: [], feat: [], condition: [] },
+      // Monk's Unarmored Defense: same shape as Barbarian's, `statId: 5` (WIS).
+      modifiers: {
+        race: [], background: [], item: [], feat: [], condition: [],
+        class: [
+          {
+            id: 1, type: "set", subType: "unarmored-armor-class", value: null, statId: 5,
+            friendlyTypeName: "Set", friendlySubtypeName: "Unarmored Armor Class",
+            componentId: 1, componentTypeId: 1,
+          },
+        ],
+      },
       spells: { race: [], class: [], background: [], item: [], feat: [] },
     };
 

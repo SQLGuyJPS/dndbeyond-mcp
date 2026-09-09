@@ -1,0 +1,33 @@
+{
+  "ac": 13,
+  "maxHp": 38,
+  "initiative": 2,
+  "passivePerception": 10,
+  "passiveInsight": 13,
+  "passiveInvestigation": 11,
+  "speeds": {
+    "walk": 30,
+    "fly": 0,
+    "swim": 0,
+    "climb": 0,
+    "burrow": 0
+  },
+  "saves": {
+    "str": -1,
+    "dex": 2,
+    "con": 2,
+    "int": 1,
+    "wis": 3,
+    "cha": 7
+  },
+  "abilityScores": {
+    "str": 8,
+    "dex": 14,
+    "con": 14,
+    "int": 12,
+    "wis": 10,
+    "cha": 19
+  },
+  "spellCount": 22,
+  "notes": "Computed values from the fixed formulas (2026-09-09), pending confirmation against the real D&D Beyond web sheet per plan §3.2."
+}

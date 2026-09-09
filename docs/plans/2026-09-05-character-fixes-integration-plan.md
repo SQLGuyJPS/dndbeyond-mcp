@@ -1041,3 +1041,188 @@ sequence above, AC read 12 → 13 → 12 → 13 → 12 across `get_character` ca
 Consistent with finding 6's read on F2: the flicker seems tied to a write-triggered cache/read-timing race
 rather than `calculateAc`'s (pure, deterministic) formula itself, but still unconfirmed and not reproducible
 on demand. Still out of scope for v0.8.0/this session; flagged again for whoever picks up PR 8 (item 2, AC).
+
+---
+
+## v0.9.0 progress (2026-09-09) — implementation done, release not yet tagged
+
+Per explicit scope for this session: implement everything possible for v0.9.0 (items 1, 3, 2, 10, 12, 8 —
+PRs 6, 7, 8, 10, 11, 12), test it, refactor as needed, and document results here. **Item 4 (PR 9) is
+deferred** — M3 (hybrid legacy-species + 2024-background fixture) wasn't built this session, so there is
+no ground-truth fixture to test against; Phase 0 already confirmed the account *can* build M3 (Half-Elf
+legacy + a 2024 background), so this is a scheduling deferral, not the plan's "account can't build it"
+case. **No version bump and no tag this session** — that waits for a future session once M3/item 4 lands
+and the ground-truth confirmations below come back.
+
+### Fixture catalog, as actually built
+
+The user built seven real characters (manually, not via the MCP's automated-build spine) and supplied
+their names; character IDs were resolved and payloads captured directly against the live API (bypassing
+this fork's own `get_character`/`list_characters`, which — confirmed below — cannot see four of these
+seven at all yet).
+
+| ID | Character | Serves | Notes |
+|---|---|---|---|
+| M1 | Omaran Thallenn | Item 2 (armored + shield, DEX cap) | Elf Bard 6, Breastplate + Shield equipped |
+| M2 | Dragonborn Test | Item 2 (natural-armor branch) | **Reinstated, not cancelled** — see below |
+| M5 | Niko | Item 3 (set-type ability score) | Belt of Hill Giant Strength equipped |
+| F3 | Balgrum Moonhide | Items 1, 2 (unarmored), 10 | User unequipped Scale Mail mid-session so the Barbarian Unarmored Defense branch is actually exercised (§3.2 requires unarmored; as first built, Balgrum wasn't) |
+| F4 | Salazar Falone | Item 2 (monk unarmored) | Monk 3, no armor |
+| F6 | Multiclass Fighter Test | Items 1 (multiclass HP), 12 | Fighter 2 / Barbarian 3 (Zealot), level 5 — matches spec exactly |
+| F2 | Warlock Test | Item 8 (spell provenance) | Real, actively-played Warlock 5 (already used in v0.8.0's post-release validation) |
+
+M4 (Niko's custom items/skill/language/tool proficiency) and M6 (Fighting Style/Metamagic/Invocations —
+Rurik Ironfist, Harbek Ungart, Warlock Test) serve v0.10.0 items 11 and 15 respectively, per user decision;
+parked untouched. F5 (Niko, campaign-less) serves v0.10.0 item 7; also parked.
+
+**M2's Phase 0 cancellation is reversed.** Phase 0 (§ above) cancelled M2 because the account owns no
+natural-armor species (Tortle/Lizardfolk/Warforged). The user built a homebrew feat ("Dragon Scales": *"When
+you aren't wearing armor, your AC is 13 + your Constitution modifier... A shield's benefits apply as
+normal..."*) as a workaround, with a genuine structured AC modifier (confirmed, not description-only).
+Live inspection of the raw payload found this is **exactly the same modifier shape** D&D Beyond uses for
+official natural-armor traits — `{ type: "set", subType: "unarmored-armor-class", value: 3, statId: 3 }`
+(the "13" as `10 + value`, `statId` naming Constitution) plus a companion `{ type: "ignore", subType:
+"unarmored-dex-ac-bonus" }` to suppress the DEX term the feat's own text omits. Item 2's design already
+treats natural armor as "just another `set`-modifier candidate," not a distinct code path, so this fixture
+exercises the real natural-armor branch faithfully despite being homebrew. Also confirmed live: the
+account's real barbarian/monk unarmored-defense features use the identical shape with `value: null` and
+`statId` 3/5 respectively — i.e. there is no hardcoded-by-class-name special case in the live data at all,
+which is why the fix removes this fork's `isBarbarian`/`isMonk` string checks entirely in favor of reading
+the modifier generically.
+
+### Blocking issue found and worked around: four characters are invisible to name lookup
+
+`list_characters` and `get_character`'s `characterName` fuzzy match only see characters in the account's
+two campaigns (13 total). **Dragonborn Test, Niko, Salazar Falone, and Multiclass Fighter Test are
+campaign-less and are invisible to both** — this is exactly item 7's diagnosed bug (`v0.10.0`), confirmed
+freshly here rather than just inferred from P8. Worked around by asking the user for each character's
+numeric ID directly and fetching by ID (which works fine — the gap is name-resolution-only, matching item
+7's diagnosis precisely).
+
+**New, distinct bug found in the same code path, not previously known:** searching `characterName: "Niko"`
+against this account didn't return "not found" — it silently returned a **different, unrelated character**
+("Duo," edit distance 3) with no error. `findCharacterByName`'s Levenshtein fallback (`src/tools/
+character.ts`) has no maximum-distance/similarity-ratio guard, so a short query can fuzzy-match an
+unrelated short name and return its full sheet as if it were correct. This is worse than item 7's "silently
+absent" gap — a caller has no way to detect a silently *wrong* answer. Logged to `BACKLOG.md`
+("Read-tool correctness"); **not fixed this session** — recommended to land alongside item 7's rework in
+v0.10.0, since both touch the same function.
+
+### What shipped (implementation + unit tests, all live-payload-grounded)
+
+Every fix below was derived from and verified against real raw JSON captured directly from the live API for
+all seven characters above (a throwaway script, not committed, same pattern as Phase 0's probes) — not
+guessed at from the plan's description alone. Before/after values for each fixture are in
+`tests/fixtures/characters/*.expected.json`.
+
+- **Item 1 — `calculateMaxHp`** (`src/utils/character-calculations.ts`). Confirmed live:
+  `baseHitPoints` is pre-CON on all seven characters (matches the fork-comparison doc's finding, credited
+  there to graham's fork). Now `base + bonus + conMod*level + sumModifierBonuses("hit-points") +
+  sumModifierBonuses("hit-points-per-level")*level`. Balgrum Moonhide (Tough feat, CON +2, level 6) went
+  from a displayed 47 to a correct 71 — a 24 HP undercount.
+- **Item 3 — `computeCharacterAbilityScore`** (new, `character-calculations.ts`), replacing
+  `computeFinalAbilityScore` at every call site in `character.ts` and `resources/character.ts` per the
+  plan's dependency note. Confirmed live: Niko's Belt of Hill Giant Strength (a `{ type: "set", subType:
+  "strength-score", value: 21 }` item modifier) was completely ignored — STR displayed 12 (her natural
+  score) instead of 21. Fixed by taking `max(natural score, every matching set modifier's value)`;
+  `override` still wins outright over everything, unchanged from prior behavior.
+- **Item 2 — `calculateAc`** (`character-calculations.ts`), three independent bugs, all confirmed live:
+  1. **Every shield examined across all seven characters carries an empty/null `type` string** — the old
+     string-only matcher (`itemType.includes("shield")`) silently skipped every one, so shield AC never
+     applied. Now prefers the numeric `armorTypeId` (1/2/3/4 = light/medium/heavy/shield), falling back to
+     string matching only when it's absent.
+  2. Unarmored AC hardcoded `isBarbarian`/`isMonk` by class name and had no path for anything else. Now
+     builds a candidate list from every `set`-type `unarmored-armor-class` modifier (barbarian, monk,
+     natural armor — all the same shape, see M2 above) and takes the max, honoring an `ignore:
+     unarmored-dex-ac-bonus` modifier and an `ac-max-dex-modifier` cap when present.
+  3. `armored-armor-class`/`unarmored-armor-class` **bonus**-type modifiers applied unconditionally
+     regardless of armor state; now gated to their matching state (confirmed live via Multiclass Fighter
+     Test's Defense fighting-style +1, which should only apply while armored).
+  - **Found and fixed while implementing (not previously known):** the fallback string matcher's naive
+    `.includes("light")` check false-matched a *weapon* named "Crossbow, Light" and misclassified it as
+    light armor, overwriting a correctly-detected Breastplate processed earlier in the same inventory loop
+    on Omaran Thallenn's real payload (AC would have come out 15, not the correct 18). Fixed by gating the
+    string fallback on the item plausibly being armor/a shield at all before asking which kind. Regression
+    test added.
+  - Worked examples confirmed against live payloads: Omaran (Breastplate+Shield) 15 → 18; Dragonborn Test
+    (natural armor+shield) 11 → 17; Multiclass Fighter Test (heavy+shield+Defense) 17 → 19; Balgrum
+    (unarmored barbarian) and Salazar (unarmored monk) were already coincidentally correct at 14 and 15 —
+    kept as regression fixtures now backed by the generic mechanism instead of the hardcoded one.
+- **Item 10 — saves/skills/spell DC** (`getSavingThrowTotal`/`getSkillTotal`/`getSpellSaveDcBonus`, new in
+  `character-calculations.ts`). Confirmed live: Omaran's Stone of Good Luck grants `bonus ability-checks
+  +1`, which every skill total excluded entirely (Acrobatics displayed +6, should be +7; Athletics -1,
+  should be 0). Now adds `saving-throws`/`ability-checks`/`spell-save-dc` plus each's per-ability/skill/
+  class-slug variant.
+- **Item 12 — speeds, initiative, passives, senses** (new in `character-calculations.ts`, new sheet
+  sections in `character.ts`). Real per-race speed via `race.weightSpeeds.normal` (every character this
+  account owns happens to be 30 ft, so the hardcoded value never showed a live discrepancy — a 25/35 ft
+  case is unit-tested against a synthetic fixture instead). Initiative, three passive scores, and nonzero
+  senses added as new sheet lines/sections; darkvision confirmed live via a real `{ type: "set-base",
+  subType: "darkvision", value: 60 }` racial modifier (Warlock Test, Tiefling).
+- **Item 8 — spell provenance** (new `src/utils/character-spells.ts`). Confirmed live on Warlock Test (a
+  real, actively-played character): the old "Prepared Spells" list showed 7 spells; the character actually
+  has access to **22**, including racial at-will/limited cantrips (Fire Bolt, Thaumaturgy, Hellish Rebuke,
+  Darkness) and — most strikingly — **the Warlock's own Eldritch Blast cantrip**, invisible under the old
+  `prepared || alwaysPrepared` filter because D&D Beyond marks at-will/invocation-granted spells
+  `prepared: false, alwaysPrepared: false` identically to a "known but not chosen today" spell. New
+  `getCharacterSpellEntries` merges all five `spells.*` collections plus the previously-unmodeled
+  `classSpells` (confirmed live to carry invocation-granted spells absent from `spells.class` entirely — a
+  gap independent of the prepared-flag issue), de-duplicating by `definition.id` and OR-ing
+  prepared/alwaysPrepared/usesSpellSlot. Header renamed `Prepared Spells` → `Spells`; each entry annotated
+  `[<sources>; <casting mode>]` per the plan's format decision.
+- **Unplanned finding, fixed alongside the above:** `sumModifierBonuses` only ever read `mod.value`, but a
+  real item-granted flat HP bonus on Salazar Falone's payload carries `value: null` with the actual number
+  in `fixedValue`. Every new bonus-summing function (HP, AC, saves, skills, spell DC, senses) depends on
+  this, so it was fixed once at the shared helper rather than worked around per call site.
+
+### Test results
+
+- **Tier 1 (`npm test`):** 532 passed (was 476 at the start of this session's work — 56 new: 48 fixture-
+  pair tests across the 7 real captured characters, plus targeted unit tests for every new function).
+  `npm run build` clean.
+- **New fixture infrastructure**, per §3.2: `src/scripts/scrub-fixture.ts` (replaces name/campaign/free
+  text, zeroes id/userId/campaignId to fixed synthetic values, preserves everything mechanically relevant,
+  fails loudly on a denylist match) and `tests/fixtures/characters/` (7 scrubbed payload + expected-value
+  pairs: `m1-armored-shield`, `m2-natural-armor`, `m5-set-ability-score`, `f3-barbarian-unarmored`,
+  `f4-monk-unarmored`, `f6-multiclass`, `f2-warlock`). The denylist check caught two real leaks during
+  scrubbing before anything was written: a renamed item embedding the character's real name
+  ("Niko's Adamantine Longsword"), and a placeholder name that accidentally contained the real name as a
+  substring ("F2 Warlock Test" for "Warlock Test") — both fixed in the scrubber/naming rather than
+  suppressed.
+- **Tier 2 (live) and Tier 3 (behavioral): not run this session — blocked by a stale running MCP server**,
+  the same gotcha the v0.8.0 report documented: `get_character` calls made through this session's already-
+  running server still reflect pre-fix output (old AC/HP values, no Initiative/Passive Scores/Senses
+  sections, "Prepared Spells" header) even after `npm run build`, because the interactive server process
+  was started before this session's rebuild. Restarting the app/MCP connection is required before Tier 2/3
+  can run meaningfully; verification in this session instead used the compiled `character-calculations.js`/
+  `character-spells.js` functions directly against the captured raw payloads (bypassing the MCP layer
+  entirely), which is why the "confirmed live" claims above are about the *data and formulas*, not about
+  this fork's own tool output.
+- **AC flicker (v0.8.0 finding 6, F2) revisited:** no formula-level explanation found — item 2's new
+  `calculateAc` is still a pure function of its input, so a flicker with no equipment change would have to
+  be a stale-cache/write-timing artifact upstream of it, consistent with the original finding's own
+  read. Still unconfirmed, still out of scope; not re-investigated further this session.
+
+### Ground truth: pending user confirmation
+
+Per §3.2, `expected.json` values must come from the D&D Beyond web sheet, not from this fork's own output
+— that would be circular. The `.expected.json` files committed this session hold values **computed from
+the fixed formulas**, cross-checked by hand against the raw modifier data (see the worked examples above),
+but **not yet independently read off the real web sheet**. Each file's `notes` field says so explicitly.
+Before this is treated as final ground truth, the user (or a future session) should confirm at least AC and
+max HP for each of the seven fixtures against the actual D&D Beyond character sheet UI, and correct
+`tests/fixtures/characters/*.expected.json` if anything disagrees.
+
+### Next steps
+
+1. Get M3 built (Half-Elf legacy species + a 2024 background), then implement item 4 (PR 9) — the only
+   v0.9.0 item not yet done.
+2. Confirm `.expected.json` ground truth against the real web sheet (above); update fixtures if needed.
+3. Restart the MCP server/connection, then run Tier 2 (live shape checks) and Tier 3 (`ddb-character-reader`
+   behavioral dispatch — read-only, so it should avoid v0.8.0's write-blocked-by-classifier issue) against
+   the now-current build.
+4. Once 1–3 are clear: version bump (`package.json` + `src/server.ts`), README changelog (the `Spells`
+   header rename needs a before/after sample per the plan's output-format decision), release checklist
+   (§5), tag `v0.9.0`.
+5. Consider fixing the Levenshtein false-positive (`BACKLOG.md`, "Read-tool correctness") alongside
+   v0.10.0's item 7, since both touch `findCharacterByName`.
